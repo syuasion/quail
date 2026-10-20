@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pyarrow as pa
 import pytest
 from helpers.fakes import (
+    QUESTION,
     FakeArena,
     fake_pipeline,
     fake_readout,
@@ -305,3 +306,24 @@ def test_predicate_nodes_keep_documents_and_join_frames_in_kv(monkeypatch):
     # The second join uses the same frame and reads only partner suffixes.
     assert metrics["join:second"]["fresh_tokens"] == len(survivors) * 4 * 20
     assert metrics["filter:r:1"]["fresh_tokens"] == sum(row[0] for row in filters)
+
+
+def test_a_filter_asks_each_repeated_document_once(monkeypatch):
+    filtered = AiFilter(
+        node_id="filter:r", inputs=input_ports((PortRef("input:r", "rows:r"),)),
+        alias="r", question_token_ids=(QUESTION,), written_position=0,
+        question_tokens=1, preamble_tokens=0, selectivity=0.8, expected_rows=14)
+    graph = PhysicalGraph((Scan(node_id="input:r", alias="r", input_id="r"),
+                           filtered), PortRef("filter:r", "rows:r"))
+    # 14 documents, each a copy of one of 4
+    result, model, filter_truth, _ = run_graph_on_arena(
+        monkeypatch, graph, num_distinct=4)
+    asked = [spec["key"][1] for kind, specs in model.launched
+             if kind == "filter" for spec in specs]
+    assert sorted(asked) == [0, 1, 2, 3]
+    root = result["_outputs"][PortRef("filter:r", "rows:r")]
+    assert sorted(root.column("r").to_pylist()) == [
+        d for d in range(14) if filter_truth[d][0]]
+    metrics = result["node_metrics"]["filter:r"]
+    assert metrics["input_rows"] == 14
+    assert metrics["copied_documents"] == 10
