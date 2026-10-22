@@ -335,7 +335,7 @@ def test_an_extract_query_reports_every_answer_and_its_pieces(tmp_path):
     assert pieces["preamble"] == (turn[0] + quail.SHARED_PRE).split()
     assert [item["id"] for item in pieces["extracts"]] == ["extract-1"]
     assert pieces["extracts"][0]["tail"][:2] == ["Question:", "Which"]
-    assert pieces["extracts"][0]["tail"][-1] == 'Phrase: "'.split()[-1]
+    assert pieces["extracts"][0]["tail"][-1] == "Phrase:"
 
 
 def test_stock_vllm_reports_an_extraction_and_its_pieces(tmp_path):
@@ -371,7 +371,7 @@ def test_stock_vllm_reports_an_extraction_and_its_pieces(tmp_path):
     # the request node carries the extraction's own head and tail
     assert pieces["preamble"] == _token_ids(turn[0] + quail.SHARED_PRE)
     assert [item["id"] for item in pieces["extracts"]] == ["extract-1"]
-    assert pieces["extracts"][0]["tail"][-1] == _token_ids('"')[-1]
+    assert pieces["extracts"][0]["tail"][-1] == _token_ids(":")[-1]
 
 
 def test_benchmark_results_and_scoring(tmp_path):

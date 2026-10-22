@@ -141,13 +141,13 @@ def dense_decoder_components(work: Work, model: ModelSpec, passes: float,
             name="attn_proj",
             flops=2.0 * attn_proj * work.tokens,
             bytes_moved=attn_proj * model.w_bytes * passes,
-            precision=model.weight_precision,
+            precision=model.weight_precision, gemm=True,
         ),
         CostComponent(
             name="mlp",
             flops=2.0 * mlp * work.tokens,
             bytes_moved=mlp_weight_params(model) * model.w_bytes * passes,
-            precision=model.weight_precision,
+            precision=model.weight_precision, gemm=True,
         ),
         CostComponent(
             name="attention",
@@ -162,7 +162,7 @@ def dense_decoder_components(work: Work, model: ModelSpec, passes: float,
         router = model.layers * model.hidden * model.experts
         components += (CostComponent(
             name="router", flops=2.0 * router * work.tokens,
-            bytes_moved=2 * router * passes, precision="bf16"),)
+            bytes_moved=2 * router * passes, precision="bf16", gemm=True),)
     if separate_gdn:
         precision = model.gdn_weight_precision
         components += (CostComponent(
@@ -170,7 +170,7 @@ def dense_decoder_components(work: Work, model: ModelSpec, passes: float,
             flops=2.0 * separate_gdn * work.tokens,
             bytes_moved=separate_gdn * {"fp8": 1, "bf16": 2, "fp32": 4}[
                 precision] * passes,
-            precision=precision,
+            precision=precision, gemm=True,
         ),)
     if model.gdn_layers:
         components += (CostComponent(
@@ -217,4 +217,4 @@ def _readout(model, rows: float, passes: float, head_rows: int) -> CostComponent
             precision="fp32")
     head = 2.0 * model.hidden * (head_rows or model.vocab)
     return CostComponent(name="readout", flops=head * rows,
-                         bytes_moved=head * passes, precision="bf16")
+                         bytes_moved=head * passes, precision="bf16", gemm=True)

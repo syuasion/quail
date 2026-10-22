@@ -15,6 +15,7 @@ class CostComponent:
     flops: float
     bytes_moved: float
     precision: Precision
+    gemm: bool = False
 
 
 @dataclass(frozen=True)
@@ -54,11 +55,11 @@ class ComponentLatency:
 def component_latency(component: CostComponent,
                       device: DeviceSpec) -> ComponentLatency:
     """Price one component against the device limits."""
+    bandwidth = (device.gemm_flops(component.precision) if component.gemm
+                 else device.arithmetic_bandwidth(component.precision))
     return ComponentLatency(
         component=component,
-        compute_seconds=(
-            component.flops
-            / device.arithmetic_bandwidth(component.precision)),
+        compute_seconds=component.flops / bandwidth,
         memory_seconds=component.bytes_moved / device.hbm_bw,
     )
 

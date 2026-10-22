@@ -50,7 +50,7 @@ def unrounded_seconds(work: _workload.Work, model: ModelSpec, device: DeviceSpec
 
 @dataclass(frozen=True)
 class SpeedOfLight:
-    """The complete bound and its component breakdown."""
+    """The SoL estimate and its component breakdown."""
 
     work: _workload.Work
     passes: int

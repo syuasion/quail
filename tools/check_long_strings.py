@@ -29,7 +29,7 @@ import re
 import sys
 from pathlib import Path
 
-DEFAULT_PATHS = ("quail", "tests", "experiments", "tools")
+DEFAULT_PATHS = ("calibrate", "quail", "tests", "experiments", "tools")
 DEFAULT_LIMIT = 200
 CONTENT_NAME = re.compile(r"prompt|template|sql|query|html|text", re.I)
 SQL_START = re.compile(r"^\s*(select|with|insert|create|update)\b", re.I)

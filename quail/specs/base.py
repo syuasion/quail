@@ -344,6 +344,13 @@ class DeviceSpec:
     usd_per_hour: float = 0.0    # rental price of one device; 0 means
     #                              no price is known
     price_source: str = ""       # where usd_per_hour was read from
+    mamf_fp8_flops: float = 0.0    # 0 uses the specification rate
+    mamf_bf16_flops: float = 0.0
+
+    def gemm_flops(self, precision: Precision) -> float:
+        """Return measured GEMM throughput, or the specification rate."""
+        measured = {"fp8": self.mamf_fp8_flops, "bf16": self.mamf_bf16_flops}
+        return measured.get(precision, 0.0) or self.arithmetic_bandwidth(precision)
 
     @property
     def attn_flops(self) -> float:

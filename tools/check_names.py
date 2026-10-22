@@ -38,7 +38,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-DEFAULT_PATHS = ("quail", "bench", "tools")
+DEFAULT_PATHS = ("calibrate", "quail", "bench", "tools")
 
 # chosen word -> the words it replaces; an identifier's words are its
 # snake_case parts, so `doc_ids` and `document_ids` are one synonym pair

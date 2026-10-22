@@ -38,7 +38,7 @@ Write like two engineers talking at a whiteboard.
 
 CI runs these on every pull request. Run them before pushing:
 
-    uv run ruff check quail bench tests experiments tools
+    uv run ruff check quail bench calibrate tests experiments tools
     uv run python tools/check_long_strings.py
     uv run python tools/check_names.py
     uv run vulture

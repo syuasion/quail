@@ -291,7 +291,7 @@ def sharing_pays(model, device, *, shared_tokens: int, total_tokens: int,
     """
     if shared_tokens <= 0:
         return False
-    saved = shared_tokens * 2.0 * model.params / device.peak_flops
+    saved = shared_tokens * coefficients(model, device)["linear_seconds"]
     cost = (0.0 if writes_pages
             else total_tokens * model.kappa / device.hbm_bw)
     return saved > cost

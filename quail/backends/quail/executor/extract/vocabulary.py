@@ -27,9 +27,11 @@ class Vocabulary:
 
     Args:
         tokenizer: A Gigatoken encoder or a tokenizer supplied by the caller.
+        turn_suffix: The model's chat-turn text after a prompt; its first
+            token closes a turn. Empty for a model without chat turns.
     """
 
-    def __init__(self, tokenizer):
+    def __init__(self, tokenizer, turn_suffix: str = ""):
         self.encoder = tokenizer if isinstance(tokenizer, GigatokenEncoder) else None
         self.offsets = (TokenOffsets(self.encoder.token_bytes())
                         if self.encoder is not None else None)
@@ -60,21 +62,16 @@ class Vocabulary:
         self.key_of = key_of
         self._options = [None] * len(self.keys)
         self._fillers = [None] * len(self.vocab)
-        self.quote_id = tokenizer.convert_tokens_to_ids('"')
-        # a decoder closes the answer with any token that opens with the
-        # quote, such as `".` or `",`: together they are the stop
-        self.stop_ids = tuple(index for index, token in enumerate(self.vocab)
-                              if token.startswith('"'))
+        # the answer ends where the model ends its turn: the turn close
+        # or the end of text, which no document holds
+        stops = {self.encode_ids(turn_suffix)[0]} if turn_suffix else set()
+        if tokenizer.eos_token_id is not None:
+            stops.add(int(tokenizer.eos_token_id))
+        if not stops:
+            raise ValueError("AI.EXTRACT needs a turn close or an end-of-text token")
+        self.stop_ids = tuple(sorted(stops))
         self.is_stop = np.zeros(len(self.vocab), dtype=bool)
         self.is_stop[list(self.stop_ids)] = True
-        # a decoder may copy a token and close the quote in one token,
-        # such as `."` or `)"`: the merged token of each token that has one
-        index = {token: i for i, token in enumerate(self.vocab)}
-        self.merged = np.full(len(self.vocab), -1, dtype=np.int64)
-        for token, i in index.items():
-            if len(token) > 1 and token.endswith('"') and token[:-1] in index:
-                self.merged[index[token[:-1]]] = i
-        self.none_id = self.encode_ids("none")[0]
 
     def options(self, kid: int) -> tuple:
         """Return the tokens that can begin a key's word, and their lengths.
@@ -170,5 +167,5 @@ def load_vocabulary(state) -> Vocabulary:
         spec = loaded.model_spec
         path = resolve_model_path(spec.hf_name, spec.revision)
         say(f"loading the tokenizer of {spec.name} for AI.EXTRACT")
-        loaded.vocabulary = Vocabulary(GigatokenEncoder(path))
+        loaded.vocabulary = Vocabulary(GigatokenEncoder(path), spec.turn_suffix)
     return loaded.vocabulary

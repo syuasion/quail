@@ -599,7 +599,7 @@ def test_model_chat_turns_share_the_document_across_operators():
             assert text.count(end) == 2
             assert text.count(start + ("model" if gemma else "assistant")) == 1
             if item.kind == "extract":
-                assert text.endswith('Phrase: "')
+                assert text.endswith("Phrase:")
             else:
                 assert text.endswith(model.turn_suffix)
         lowered = lower_prompt(bound[2], lambda text: list(text.encode()))

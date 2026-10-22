@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from quail.cost import budgets
 from quail.cost import extract as extract_cost
-from quail.cost.dense_decoder_cost import dense_params
+from quail.cost.retention import coefficients
 from quail.logical import effective_selectivity
 from quail.physical import (
     AiExtract,
@@ -41,7 +41,7 @@ def extract_spec(context, call, name, expected_rows, resident=False) -> ExtractS
     model, device = context.model, context.device
     # one document token's KV read per round, in tokens of compute: the
     # pass is compute-bound, so a fed token costs its dense FLOPs
-    token_seconds = 2 * dense_params(model) / device.peak_flops
+    token_seconds = coefficients(model, device)["linear_seconds"]
     round_cost_per_token = model.kappa / device.hbm_bw / token_seconds
     spec = bind_inference(
         ExtractSpec, call.prompt, name=name,

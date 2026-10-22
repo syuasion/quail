@@ -9,7 +9,9 @@ import pyarrow as pa
 import pytest
 from helpers.extract_fakes import (
     LEASE,
+    NONE_HELD,
     NOTHING,
+    QUOTED,
     TAIL,
     TERM,
     make_spec,
@@ -49,44 +51,37 @@ from quail.specs import DEVICES, MODELS, QWEN3_4B_FP8
 
 @pytest.mark.parametrize(("scores", "stop", "chosen", "done"), [
     ([-1, -1, -9, -10], -8, 1, False),
-    ([-2, -1, -0.5, -10], -8, 1, True),
     ([-2, -1, -9, -10], -1, None, True),
     ([-2, -1, -9, -0.5], -8, None, True),
 ])
-def test_continuation_arrays_handle_duplicates_ties_quotes_and_stops(
+def test_continuation_arrays_handle_duplicates_ties_and_stops(
         scores, stop, chosen, done):
     tokens = [33, 1, 1]
-    merged = np.full(64, -1, dtype=np.int64)
-    merged[1] = 40
-    vocabulary = SimpleNamespace(vocab=range(64), merged=merged,
-                                 is_stop=np.zeros(64, dtype=bool), none_id=63)
+    vocabulary = SimpleNamespace(vocab=range(64), is_stop=np.zeros(64, dtype=bool))
     vocabulary.is_stop[62] = True
-    decoder = Decoder(vocabulary, 4, 10, 1, make_spec()[0])
+    decoder = Decoder(vocabulary, 4, 9, 1, make_spec()[0])
     text = "abcdefghij"
     streams = [Stream(at, [0, token], [at + 1, at + 2], text, exhausted=True)
                for at, token in enumerate(tokens)]
     streams.append(Stream(5, [0], [6], text, exhausted=True))
     answer = AnswerState(written=[0], streams=streams)
     document = SimpleNamespace(answers=[answer], text=text)
-    actual = decoder.choose(document, 0, [-20, stop, 33, 1, 40, 50, *scores])
+    actual = decoder.choose(document, 0, [stop, 33, 1, 40, 50, *scores])
     assert actual == (chosen if not done else None)
     assert answer.done == done
     assert answer.written == ([0, chosen] if chosen is not None else [0])
     if chosen is not None:
         assert [s.char for s in answer.streams] == [
             index for index, token in enumerate(tokens) if token == chosen]
-    if chosen is not None and done:
-        start = tokens.index(chosen)
-        assert answer.span == (start, start + 2)
 
 
 def test_readout_scores_reset_between_rows_and_keep_token_order():
     _, vocabulary = make_spec()
-    decoder = Decoder(vocabulary, 4, 10, 1, make_spec()[0])
-    scores, none, stop = decoder.lp([-4, -5, 5, 2, 3, 4, -1, -1, -2, -3])
-    assert decoder.top == 5 and none == -4 and stop == -5
+    decoder = Decoder(vocabulary, 4, 9, 1, make_spec()[0])
+    scores, stop = decoder.lp([-5, 5, 2, 3, 4, -1, -1, -2, -3])
+    assert decoder.top == 5 and stop == -5
     assert scores[5] == scores[2] == -1
-    reused, _, _ = decoder.lp([-6, -7, 6, 1, 0, 0, -0.5, -1, -20, -30])
+    reused, _ = decoder.lp([-7, 6, 1, 0, 0, -0.5, -1, -20, -30])
     assert reused is scores
     assert decoder.top == 6
     assert reused[5] == reused[2] == -np.inf
@@ -105,7 +100,7 @@ def test_writing_that_begins_outside_the_document_answers_none(monkeypatch):
         if key[1] != 0:
             return cue_row(key)
         march = tables.encode_ids("March")[0]
-        return model._cue({stray: -0.05, march: -0.5}, -5.0, -6.0)
+        return model._cue({stray: -0.05, march: -0.5}, -6.0)
 
     model._cue_row = straying
     result, stages = run()
@@ -128,7 +123,7 @@ def test_writing_that_leaves_the_document_later_ends_the_answer(monkeypatch):
         row = answer_row(key, written)
         if key[1] == 0 and len(written) == 1:
             gold = model._gold_ids(key)
-            return model._cue({stray: -0.05, gold[1]: -1.0}, -9.0, -4.0)
+            return model._cue({stray: -0.05, gold[1]: -1.0}, -4.0)
         return row
 
     model._answer_row = straying
@@ -136,6 +131,42 @@ def test_writing_that_leaves_the_document_later_ends_the_answer(monkeypatch):
     assert result.outputs["rows:c"].column("ends").to_pylist() == [
         "March", "five years", None]
     assert not stages.documents[0].answers[0].none_wins
+
+
+def _extract_one(monkeypatch, text, gold):
+    """Ask the scripted model one question of one document; return its answer."""
+    spec, tables = make_spec()
+    monkeypatch.setattr(chunk_mod, "pack_chunk", fake_pack)
+    model = ScriptedModel(tables, {}, {}, 4)
+    readout = _fake_readout(tables, 4)
+    monkeypatch.setattr(ExtractionStages, "_readout", lambda self, state: readout)
+    state = _state(model)
+    state.loaded_model.vocabulary = tables
+    stages = ExtractionStages(state, [spec], tables, [0],
+                              [tables.encode_ids(text)], [text])
+    key = stages.documents[0].key
+    model.documents[key] = text
+    model.gold[key] = gold
+    from quail.backends.quail.executor.stages import run_stages
+
+    run_stages(state.torch, state.loaded_model.arena,
+               state.loaded_model.pipeline, stages.stages, stages.prefixes,
+               state.chunk_tokens, anchor_keys=stages.keys,
+               appended_tokens=stages.appended_tokens)
+    stages.finish()
+    return stages.documents[0].answers[0]
+
+
+def test_an_answer_copies_the_quotes_inside_its_span(monkeypatch):
+    asked = _extract_one(monkeypatch, QUOTED, ' the "Premises" for five years')
+    assert asked.answer == 'the "Premises" for five years'
+    assert asked.span == (9, 38)
+
+
+def test_an_answer_may_begin_with_none(monkeypatch):
+    asked = _extract_one(monkeypatch, NONE_HELD, "None of the parties")
+    assert asked.answer == "None of the parties"
+    assert asked.span == (0, 19)
 
 
 @pytest.mark.parametrize("recurrent", [False, True])
@@ -165,8 +196,8 @@ def test_a_rejected_draft_is_replaced_by_the_next_round(monkeypatch, recurrent):
     stages.finish()
     asked = stages.documents[0].answers[0]
     assert asked.answer == "five years" and asked.span == (13, 23)
-    assert asked.written == tables.encode_ids("five years")
-    five, days, years = (tables.encode_ids(w)[0] for w in ("five", " days", " years"))
+    assert asked.written == tables.encode_ids(" five years")
+    five, days, years = (tables.encode_ids(w)[0] for w in (" five", " days", " years"))
     fed = [(suffix, f) for k, suffix, kept, _, f in model.packed if k == key]
     # the cue, then the two rounds: the second starts where the first
     # verified, one token past the first round's position
@@ -214,9 +245,11 @@ class ScriptedModel:
     """Writes the gold answer: the lines that hold it, its tokens, then stops.
 
     At the cue the model prefers the gold answer's first word, written
-    without its space; at each later step it prefers the gold answer's
+    with its space; at each later step it prefers the gold answer's
     next token while the tokens written so far are a prefix of it,
-    and closes the quote once the whole answer is written.
+    and ends its turn once the whole answer is written. As in the
+    model's readout, the stop value includes the probabilities of
+    the stop tokens among the top tokens.
     """
 
     def __init__(self, tables, documents, gold, k):
@@ -226,9 +259,7 @@ class ScriptedModel:
         self.k = k
         self.filter_truth = {}      # key -> a filter question's answer
         self.reads = Counter()      # key -> times its prefix was packed
-        self.width = 2 + 2 * k
-        # the phrase cue ends in the quote that follows a space, which
-        # is not the quote that closes an answer
+        self.width = 1 + 2 * k
         self.cue_token = tables.encode_ids(TAIL)[-1]
         self.kv = {}                # key -> tokens appended after the prefix
         self.prefix_len = {}        # key -> the prefix's tokens
@@ -247,9 +278,12 @@ class ScriptedModel:
         return self._row(list(extras) + [float(i) for i, _ in best]
                          + [v for _, v in best])
 
-    def _cue(self, lps, none_lp, stop_lp):
-        """A row: none, the stop, then the top tokens."""
-        return self._top(lps, [none_lp, stop_lp])
+    def _cue(self, lps, stop_lp):
+        """A row: the stop, then the top tokens."""
+        for token, value in lps.items():
+            if self.tables.is_stop[token]:
+                stop_lp = np.logaddexp(stop_lp, value)
+        return self._top(lps, [stop_lp])
 
     def _gold_ids(self, key):
         gold = self.gold[key]
@@ -292,7 +326,7 @@ class ScriptedModel:
             return self._answer_row(key, path[cue + 1:])
         if key in self.filter_truth:
             # a filter's question: the row's first value is the answer
-            row = self._cue({}, -9.0, -9.0)
+            row = self._cue({}, -9.0)
             row[:] = float(self.filter_truth[key])
             return row
         raise AssertionError(f"unexpected request {path}")
@@ -302,15 +336,16 @@ class ScriptedModel:
         gold = self._gold_ids(key)
         lps = {}
         if gold:
-            # the model writes the first word without its space, and
-            # every other document word is far behind
+            # the model writes the first word with its space after the
+            # cue, and every other document word is far behind
             first = same_word(tables.vocab[gold[0]]) or gold[0]
             for index in tables.variants.get(first, [gold[0]]):
-                lps[index] = -0.5 if not tables.vocab[index].startswith("Ġ") else -0.9
+                lps[index] = -0.5 if tables.vocab[index].startswith("Ġ") else -0.9
             for index in tables.variants.get("the", []):
                 lps[index] = -2.0
-        none_lp = -0.2 if not gold else -5.0
-        return self._cue(lps, none_lp, -6.0)
+            return self._cue(lps, -6.0)
+        # without an answer the model leaves the phrase empty
+        return self._cue({}, -0.2)
 
     def _answer_row(self, key, written):
         """The answer's next token while the writing fits the gold, then the stop."""
@@ -319,15 +354,15 @@ class ScriptedModel:
         keys = [same_word(tables.vocab[t]) or t for t in gold]
         fed = [same_word(tables.vocab[t]) or t for t in written]
         if fed == keys:
-            return self._cue({}, -9.0, -0.1)
+            return self._cue({}, -0.1)
         if fed == keys[:len(fed)]:
-            return self._cue({gold[len(fed)]: -0.2}, -9.0, -4.0)
-        return self._cue({}, -9.0, -0.5)
+            return self._cue({gold[len(fed)]: -0.2}, -4.0)
+        return self._cue({}, -0.5)
 
 
 def _fake_readout(tables, k):
     """A readout over scripted rows."""
-    width = 2 + 2 * k
+    width = 1 + 2 * k
     value = fake_readout(k=k, width=width, ragged=True, dtype=np.dtype(object))
 
     def submit(rows, rows_per_answer=None):
@@ -699,7 +734,7 @@ def test_a_second_extraction_reads_the_documents_resident_kv(monkeypatch):
 
 @pytest.mark.parametrize("limit,draft", [(5, 16), (3, 0), (1, 0)])
 def test_extractor_stops_at_the_answer_token_cap(monkeypatch, limit, draft):
-    # a model that never closes the quote keeps writing the document;
+    # a model that never ends its turn keeps writing the document;
     # the answer ends at stages.spec.max_answer_tokens
     long = " ".join(["word"] * 200)
     spec, tables = make_spec(long)

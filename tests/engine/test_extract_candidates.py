@@ -25,14 +25,16 @@ def test_gigatoken_vocabulary_encodes_unicode_without_transformers(monkeypatch):
     native = Tokenizer(models.BPE())
     native.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     native.train_from_iterator(texts, trainers.BpeTrainer(
-        vocab_size=256, initial_alphabet=pre_tokenizers.ByteLevel.alphabet()))
+        vocab_size=256, initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+        special_tokens=["<|im_end|>"]))
     expected = native.encode_batch(texts, add_special_tokens=False)
     encoder = GigatokenEncoder(native)
     monkeypatch.setitem(sys.modules, "transformers", None)
-    tables = Vocabulary(encoder)
+    tables = Vocabulary(encoder, "<|im_end|>\nassistant\n")
     monkeypatch.setattr(encoder, "batch_arrow", lambda _: pytest.fail(
         "continuations must not convert through Arrow token documents"))
-    assert tables.quote_id in tables.stop_ids
+    # the answer ends at the turn close alone: a quote is document text
+    assert tables.stop_ids == (native.token_to_id("<|im_end|>"),)
     for (ids, offsets), original in zip(tables.encode_batch(texts), expected):
         assert list(ids) == original.ids
         assert offsets.tolist() == [list(pair) for pair in original.offsets]

@@ -5,7 +5,7 @@ each token is chosen among the tokens that continue some position of
 the document: the span is the document's own text wherever the
 model's writing leads. Each round feeds the chosen token and the
 document's next tokens as a draft, and the rows after them verify it.
-The answer ends where the model would close the quote, or where its
+The answer ends where the model would end its turn, or where its
 writing would leave the document.
 """
 
@@ -31,7 +31,6 @@ class AnswerState:
     """One document's rounds and result for one question."""
 
     asked: bool = False     # the document reached the question's stages
-    none_lp: float = NEG
     best_lp: float = NEG
     written: list = field(default_factory=list)   # the answer's tokens so far
     streams: list = field(default_factory=list)      # the drafts the writing fits
@@ -64,8 +63,8 @@ class Decoder:
     Args:
         vocabulary: The model's vocabulary index.
         gpus: How many likeliest tokens each readout row carries.
-        width: The values in each readout row: none, the stop, then
-            k ids and k log probabilities.
+        width: The values in each readout row: the stop, then k ids
+            and k log probabilities.
         questions: How many questions the pipeline asks.
         spec: Extraction plan carrying the execution settings.
     """
@@ -121,7 +120,7 @@ class Decoder:
         return answer.fed
 
     def lp(self, values) -> tuple:
-        """Return a row's log probabilities by token id, and none's and the stop's."""
+        """Return a row's log probabilities by token id, and the stop's."""
         values = np.asarray(values, dtype=np.float32).reshape(-1)
         k = self.k
         self.scores[self.previous_ids] = NEG
@@ -129,7 +128,7 @@ class Decoder:
         self.scores[ids] = values[-k:]
         self.previous_ids = ids
         self.top = int(ids[np.argmax(self.scores[ids])])
-        return self.scores, float(values[0]), float(values[1])
+        return self.scores, float(values[0])
 
     def verify(self, document: Document, q: int, rows, fed) -> None:
         """Choose the answer's tokens from a round's rows, in order.
@@ -186,9 +185,8 @@ class Decoder:
 
         With one live stream the draft is that stream's next tokens, so
         a row writes the draft token exactly when choose() would: the
-        token beats the stop, closing the quote after it is not
-        preferred, and the model's likeliest token stays in the
-        document. Those tests read a few values per row, so every row
+        token beats the stop and the model's likeliest token stays in
+        the document. Those tests read a few values per row, so every row
         of the round is decided at once; the first row that fails, and
         the rows after it, go through choose().
         """
@@ -202,24 +200,15 @@ class Decoder:
         ids = values[:, -2 * k:-k].astype(np.int64)
         lps = values[:, -k:]
         draft = np.asarray(fed[1:n + 1], dtype=np.int64)
-        merged = vocabulary.merged[draft]
         index = np.arange(n)
-
-        def lookup(tokens):
-            hit = ids == tokens[:, None]
-            found = lps[index, hit.argmax(axis=1)]
-            return np.where(hit.any(axis=1), found, NEG)
-
-        lp_draft = lookup(draft)
-        lp_merged = lookup(merged)
+        hit = ids == draft[:, None]
+        lp_draft = np.where(hit.any(axis=1), lps[index, hit.argmax(axis=1)], NEG)
         top_col = lps.argmax(axis=1)
         top, lp_top = ids[index, top_col], lps[index, top_col]
-        stop = values[:, 1]
-        best = np.maximum(lp_draft, stop)
-        allowed = (top == draft) | (top == merged)
-        leaves = ((lp_top > best) & ~allowed & ~vocabulary.is_stop[top]
-                  & (top != vocabulary.none_id))
-        writes = (lp_draft > stop) & ~(lp_merged > best) & ~leaves
+        stop = values[:, 0]
+        leaves = ((lp_top > np.maximum(lp_draft, stop)) & (top != draft)
+                  & ~vocabulary.is_stop[top])
+        writes = (lp_draft > stop) & ~leaves
         return int(np.argmin(writes)) if not writes.all() else n
 
     def choose(self, document: Document, q: int, values):
@@ -229,26 +218,24 @@ class Decoder:
         writing would leave the document: a token it likes better than
         every continuation and the stop, and that continues no
         position, ends the answer, and at the cue it answers none, as
-        does the model writing none or closing the quote at once. At
-        the cue, the token is the likeliest first token of any
-        position in the document; afterwards, the likeliest continuation
-        of the streams the writing so far fits. A token the model
-        would write with the closing quote, such as `."`, ends the
-        answer after that token. The answer also ends when closing the
-        quote is at least as likely as every continuation, when no
-        stream continues, or at the configured answer limit.
+        does the model ending its turn at once, the empty phrase the
+        prompt asks for when there is no answer. At the cue, the token is the
+        likeliest first token of any position in the document;
+        afterwards, the likeliest continuation of the streams the
+        writing so far fits. The answer also ends when ending the turn
+        is at least as likely as every continuation, when no stream
+        continues, or at the configured answer limit.
 
         Returns:
             The token written, or None when the answer ended.
         """
         answer = document.answers[q]
         vocabulary = self.vocabulary
-        lp, none_lp, stop_lp = self.lp(values)
+        lp, stop_lp = self.lp(values)
         if not answer.written:
             starts = first_tokens(vocabulary, lp, document.scan)
-            answer.none_lp = none_lp
             answer.best_lp = starts.best_lp
-            answer.none_wins = (max(none_lp, stop_lp) > answer.best_lp
+            answer.none_wins = (stop_lp > answer.best_lp
                                 or self.leaves(lp, starts.allows(self.top),
                                                answer.best_lp, stop_lp))
             if answer.none_wins:
@@ -262,16 +249,8 @@ class Decoder:
         else:
             at = len(answer.written)
             ensure_tokens(answer.streams, at, vocabulary)
-            best, joined, joined_lp, allowed, next_tokens = self.continuations(
-                answer, at, lp)
+            best, allowed, next_tokens = self.continuations(answer, at, lp)
             best_lp = NEG if best is None else lp[best]
-            if joined is not None and joined_lp > max(best_lp, stop_lp):
-                answer.written.append(joined)
-                if next_tokens is not None:
-                    answer.streams = [s for s, keep in zip(
-                        answer.streams, next_tokens == joined) if keep]
-                self.settle(document, q)
-                return None
             if (best is None or stop_lp >= best_lp
                     or self.leaves(lp, allowed, best_lp, stop_lp)):
                 self.settle(document, q)
@@ -287,38 +266,30 @@ class Decoder:
         return token
 
     def continuations(self, answer: AnswerState, at: int, lp) -> tuple:
-        """Rate the next tokens and quote endings of the answer's live streams."""
-        merged_ids = self.vocabulary.merged
+        """Return the likeliest next token of the live streams.
+
+        Returns:
+            The token, or None when no stream continues; whether the
+            model's likeliest token continues a stream; and each
+            stream's next token, or None with one stream.
+        """
         if len(answer.streams) == 1:
             stream = answer.streams[0].stream
             best = stream[at] if at < len(stream) else None
-            merged = int(merged_ids[best]) if best is not None else -1
-            joined_lp = lp[merged] if merged >= 0 else NEG
-            joined = best if joined_lp > NEG else None
-            allowed = self.top == best or self.top == merged
-            return best, joined, joined_lp, allowed, None
+            return best, self.top == best, None
         next_tokens = np.fromiter(
             (s.stream[at] if at < len(s.stream) else -1 for s in answer.streams),
             dtype=np.int64, count=len(answer.streams))
         following = np.unique(next_tokens[next_tokens >= 0])
         best = int(following[np.argmax(lp[following])]) if len(following) else None
-        merged = merged_ids[following]
-        valid = merged >= 0
-        originals, merged = following[valid], merged[valid]
-        rated = lp[merged] > NEG
-        originals, merged = originals[rated], merged[rated]
-        index = int(np.argmax(lp[merged])) if len(merged) else None
-        joined = int(originals[index]) if index is not None else None
-        joined_lp = lp[merged[index]] if index is not None else NEG
-        allowed = bool(np.any(following == self.top) or np.any(merged == self.top))
-        return best, joined, joined_lp, allowed, next_tokens
+        return best, bool(np.any(following == self.top)), next_tokens
 
     def leaves(self, lp, top_allowed: bool, best_lp, stop_lp) -> bool:
         """Return whether the model's likeliest token leaves the document."""
         vocabulary = self.vocabulary
         top = self.top
         return (lp[top] > max(best_lp, stop_lp) and not top_allowed
-                and not vocabulary.is_stop[top] and top != vocabulary.none_id)
+                and not vocabulary.is_stop[top])
 
     def settle(self, document: Document, q: int) -> None:
         """Set the question's answer for the document: its span, or none.

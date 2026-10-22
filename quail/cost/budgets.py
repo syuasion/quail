@@ -3,10 +3,11 @@
 Chunk budget, admission budget, and roofline arithmetic.
 """
 
+from math import ceil
+
 from quail.specs import DeviceSpec, ModelSpec
 
 POOL_FRACTION = 0.95    # fraction of device memory the executor claims
-CHUNK_SLACK = 2         # slack factor on the activation bound
 PAGE_TOKENS = 16        # KV arena page size, tokens
 INT32_MAX = 2**31 - 1
 ACT_BYTES = 2           # bf16 activations, bytes per element
@@ -37,12 +38,25 @@ def kernel_index_cap(model: ModelSpec) -> int:
 
 
 def chunk_memory_bound(model: ModelSpec, device: DeviceSpec) -> int:
-    """Tokens per chunk the activation memory allows, with slack.
+    """Return the largest chunk that fits its memory reservations, or zero."""
+    available = device.mem_bytes * POOL_FRACTION
+    free = available - model.W_resident
+    lower = 0
+    upper = max(0, int(free // (ACT_RESERVE_CHUNKS * model.act_per_token)))
+    while lower < upper:
+        chunk = (lower + upper + 1) // 2
+        if chunk_memory_bytes(model, chunk) <= available:
+            lower = chunk
+        else:
+            upper = chunk - 1
+    return lower
 
-    Uses resident weights after the full untied output head is discarded.
-    """
-    free = device.mem_bytes * POOL_FRACTION - model.W_resident
-    return int(free // model.act_per_token) // CHUNK_SLACK
+
+def chunk_memory_bytes(model: ModelSpec, chunk_tokens: int) -> float:
+    """Return resident weights, activation memory, and checkpoint reservations."""
+    return (model.W_resident
+            + ACT_RESERVE_CHUNKS * chunk_tokens * model.act_per_token
+            + checkpoint_memory_bytes(model, chunk_tokens))
 
 
 def pages(tokens: int) -> int:
@@ -51,15 +65,15 @@ def pages(tokens: int) -> int:
 
 
 def chunk_budget(model: ModelSpec, device: DeviceSpec) -> int:
-    """Effective chunk budget, floored at the compute knee.
+    """Return the chunk budget allowed by the model and device.
 
-    The budget is min(memory bound, kernel index cap, the spec's own
-    cap when it has one) before the floor.
+    Memory, kernel indexing, and the model's configured cap are hard limits.
+    Return zero when even one token cannot fit the memory reservations.
     """
     b = min(chunk_memory_bound(model, device), kernel_index_cap(model))
     if model.chunk_cap_tokens:
         b = min(b, model.chunk_cap_tokens)
-    return max(b, int(compute_knee(model, device)))
+    return b
 
 
 def arena_bytes(model: ModelSpec, device: DeviceSpec,
@@ -114,6 +128,22 @@ def checkpoint_pass_bytes(model: ModelSpec, questions: int,
 def execution_pages(chunk_tokens: int) -> int:
     """KV pages kept free for two chunks of execution."""
     return 2 * -(-chunk_tokens // PAGE_TOKENS)
+
+
+def checkpoint_memory_bytes(model: ModelSpec, chunk_tokens: int) -> float:
+    """Return workspace, execution KV, and one retained document's KV and state.
+
+    Models without checkpoints reserve zero bytes. A retained document can
+    be as long as a chunk; startup reserves at least the default document
+    length used by the checkpoint pool.
+    """
+    if not model.checkpoint_bytes:
+        return 0
+    document_tokens = max(chunk_tokens, CHECKPOINT_DEFAULT_DOC_TOKENS)
+    reserved_pages = (execution_pages(chunk_tokens) + pages(document_tokens)
+                      + ceil(checkpoint_pages(model)))
+    return (checkpoint_pass_bytes(model, CHECKPOINT_PASS_QUESTIONS, chunk_tokens)
+            + reserved_pages * model.kappa * PAGE_TOKENS)
 
 
 def hybrid_pool_pages(model: ModelSpec, device: DeviceSpec,
@@ -223,7 +253,7 @@ def arena_tokens(model: ModelSpec, device: DeviceSpec,
 # ---- roofline arithmetic
 
 def _projection_shapes(model: ModelSpec):
-    """Return (in_dim, out_dim, layers) of every dense projection.
+    """Return (in_dim, out_dim, layers, precision) of each dense projection.
 
     `layers` counts the layers that have the projection: the attention
     projections sit in the layers that store KV, the Gated DeltaNet
@@ -233,22 +263,24 @@ def _projection_shapes(model: ModelSpec):
     qkv_out = (query_width * model.num_q_heads + 2 * model.num_kv_heads) * model.d_head
     inter = model.intermediate
     attention = len(model.attention_layers)
-    shapes = [(model.hidden, qkv_out, attention),
-              (model.num_q_heads * model.d_head, model.hidden, attention),
-              (model.hidden, model.ffn_width, model.layers),
-              (inter, model.hidden, model.layers)]
+    shapes = [(model.hidden, qkv_out, attention, model.weight_precision),
+              (model.num_q_heads * model.d_head, model.hidden, attention,
+               model.weight_precision),
+              (model.hidden, model.ffn_width, model.layers, model.weight_precision),
+              (inter, model.hidden, model.layers, model.weight_precision)]
     if model.gdn_layers:
         key_width = model.gdn_key_heads * model.gdn_key_dim
         value_width = model.gdn_value_heads * model.gdn_value_dim
         gdn = len(model.gdn_layers)
+        precision = model.gdn_weight_precision or model.weight_precision
         shapes += [(model.hidden,
                     2 * key_width + 2 * value_width + 2 * model.gdn_value_heads,
-                    gdn),
-                   (value_width, model.hidden, gdn)]
+                    gdn, precision),
+                   (value_width, model.hidden, gdn, precision)]
     if model.short_conv_layers:
         short = len(model.short_conv_layers)
-        shapes += [(model.hidden, 3 * model.hidden, short),
-                   (model.hidden, model.hidden, short)]
+        shapes += [(model.hidden, 3 * model.hidden, short, model.weight_precision),
+                   (model.hidden, model.hidden, short, model.weight_precision)]
     return tuple(shapes)
 
 
@@ -257,16 +289,17 @@ def compute_knee(model: ModelSpec, device: DeviceSpec) -> float:
 
     That is where they cross the roofline ridge.
     """
-    ridge = device.peak_flops / device.hbm_bw
-    tot_p = tot_io = 0.0
-    for din, dout, layers in _projection_shapes(model):
+    compute_seconds = weight_bytes = activation_bytes = 0.0
+    for din, dout, layers, precision in _projection_shapes(model):
         share = layers / model.layers
-        tot_p += share * din * dout
-        tot_io += share * (din + dout)
-    denom = 2.0 * tot_p - ridge * tot_io * ACT_BYTES
+        params = share * din * dout
+        compute_seconds += 2 * params / device.gemm_flops(precision)
+        weight_bytes += params * {"fp8": 1, "bf16": 2, "fp32": 4}[precision]
+        activation_bytes += share * (din + dout) * ACT_BYTES
+    denom = compute_seconds * device.hbm_bw - activation_bytes
     if denom <= 0:
         raise ValueError("projections never cross the ridge")
-    return ridge * tot_p * model.w_bytes / denom
+    return weight_bytes / denom
 
 
 def _attention_time(model: ModelSpec, device: DeviceSpec,
@@ -276,7 +309,7 @@ def _attention_time(model: ModelSpec, device: DeviceSpec,
     flops = 4.0 * chunk * context * model.num_q_heads * model.d_head
     moved = (context * model.kappa / layers
              + 2.0 * chunk * model.num_q_heads * model.d_head * ACT_BYTES)
-    return max(flops / device.peak_flops,
+    return max(flops / device.arithmetic_bandwidth(model.attention_precision),
                moved / device.hbm_bw) * layers
 
 

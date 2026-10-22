@@ -520,7 +520,7 @@ def test_planner_places_and_scores_classifications(session, tmp_path):
     assert classify.inputs[0].source.node_id == "ai_join:r"
     assert classify.spec.scoring == "trie_tree"
     assert classify.spec.expected_rows == pytest.approx(1.8)
-    assert round(plan.estimated_seconds, 3) == 0.322
+    assert round(plan.estimated_seconds, 3) == 0.385
     (staged,) = [n for n in plan.nodes if isinstance(n, AiJoin)]
     assert (staged.exec_index, staged.anchor) == (0, "r")
     assert classified_above_joins(after._logical_input.root) == frozenset()
@@ -572,7 +572,7 @@ def test_planner_places_and_scores_classifications(session, tmp_path):
     (classify,) = [n for n in plan.nodes if isinstance(n, AiClassify)]
     assert (classify.spec.scoring, classify.spec.expected_rows) == (
         "trie_tree", 30.0)
-    assert round(plan.estimated_seconds, 3) == 0.464
+    assert round(plan.estimated_seconds, 3) == 0.555
     written_candidate, lifted_candidate = _candidates(session, before)
     assert (written_candidate.estimated_seconds
             <= lifted_candidate.estimated_seconds)

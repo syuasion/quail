@@ -2,27 +2,19 @@
 
 import re
 
-NONE_ANSWER = "none"
-PHRASE_CLOSE = '"'
 
-
-def read_phrase(decoded: str, close: str = PHRASE_CLOSE) -> str | None:
+def read_phrase(decoded: str) -> str | None:
     """Return the words the model wrote after the phrase cue.
 
-    The answer runs to the closing quote, or to the end of the text
-    when the model did not close it.
+    The answer is the whole text, up to where the model ended its turn.
 
     Args:
         decoded: The text the model wrote after the phrase cue.
-        close: The string that closes the answer.
 
     Returns:
-        The answer, or None for an empty answer or the word "none".
+        The answer, or None for an empty answer.
     """
-    phrase = decoded.split(close, 1)[0].strip()
-    if not phrase or phrase.casefold().rstrip(".") == NONE_ANSWER:
-        return None
-    return phrase
+    return decoded.strip() or None
 
 
 def locate_span(document: str, phrase: str) -> tuple[int, int] | None:

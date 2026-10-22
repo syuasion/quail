@@ -243,7 +243,7 @@ def classification_rows(spec, columns, labels) -> Rows:
 def extract_documents(client, spec, bodies, texts, body_texts=None) -> dict:
     """Decode one answer per prompt body and locate it in the document's text.
 
-    Generation stops at the quote that closes the phrase. An answer
+    Generation stops where the model ends its turn. An answer
     the document holds is returned as the document's own text at its
     span; "none" gives nulls;
     an answer the document does not hold is returned as written, with
@@ -263,7 +263,7 @@ def extract_documents(client, spec, bodies, texts, body_texts=None) -> dict:
         counts, and the generation seconds.
     """
     tail = token_list(spec.tail_token_ids)
-    params = client.decode_params(spec.max_answer_tokens, stop=['"'])
+    params = client.decode_params(spec.max_answer_tokens)
     if body_texts is not None:
         prompts = [body_text + spec.tail_text for body_text in body_texts]
     else:

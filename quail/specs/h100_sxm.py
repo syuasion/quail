@@ -12,6 +12,10 @@ H100_SXM = DeviceSpec(
     #                        (https://www.nvidia.com/en-us/data-center/h100/)
     usd_per_hour=3.9492,
     price_source="https://modal.com/pricing",
+    # Validated mamf-finder runs on quail-results, under
+    # /results/calibrate/h100-sxm/gemm/. FP8 keeps the earlier higher rate.
+    mamf_fp8_flops=1.629e15,  # 20261013T221653Z/published_fp8.txt
+    mamf_bf16_flops=857e12,   # 20261021T003022688120Z-g0/bf16.txt
 )
 
 # The price every $/query number in reports uses: query hours times

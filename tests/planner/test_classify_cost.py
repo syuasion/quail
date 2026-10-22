@@ -35,7 +35,7 @@ def _head_bytes():
 
 
 def _readout_seconds(rows, passes):
-    return max(_head_bytes() * rows / H100_SXM.arithmetic_bandwidth("bf16"),
+    return max(_head_bytes() * rows / H100_SXM.gemm_flops("bf16"),
                _head_bytes() * passes / H100_SXM.hbm_bw)
 
 
@@ -173,7 +173,8 @@ def test_one_token_labels_decode_as_a_merged_letters_request():
 
 
 def test_smaller_chunks_pay_more_weight_reads_without_changing_work():
-    device = replace(H100_SXM, peak_flops=float("inf"), bf16_flops=float("inf"))
+    device = replace(H100_SXM, peak_flops=float("inf"), bf16_flops=float("inf"),
+                     mamf_fp8_flops=float("inf"), mamf_bf16_flops=float("inf"))
     large = _cost((10, 20, 30), device=device)
     small = _cost((10, 20, 30), device=device, chunk=40)
     assert asdict(small.work) == pytest.approx(asdict(large.work))
@@ -291,7 +292,7 @@ def test_one_token_labels_read_only_their_target_rows():
     targets = 2 * QWEN3_4B_FP8.hidden * 3
     assert cost.seconds == pytest.approx(
         unrounded_seconds(work, QWEN3_4B_FP8, H100_SXM, CHUNK)
-        + max(targets * len(lengths) / H100_SXM.arithmetic_bandwidth("bf16"),
+        + max(targets * len(lengths) / H100_SXM.gemm_flops("bf16"),
               targets * cost.passes / H100_SXM.hbm_bw))
     longer = _cost(lengths, ((10,), (20, 21), (30,)), scoring="letters")
     assert longer.work == cost.work

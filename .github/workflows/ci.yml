@@ -24,7 +24,7 @@ jobs:
           "https://github.com/"
       - run: uv sync --frozen
       - name: Lint (ruff)
-        run: uv run --frozen ruff check quail bench tests experiments tools
+        run: uv run --frozen ruff check quail bench calibrate tests experiments tools
       - name: Long string literals
         run: uv run --frozen python tools/check_long_strings.py
       - name: Names (check_names)

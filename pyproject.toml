@@ -56,7 +56,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-quail-b = { git = "https://github.com/fsdatalab/quail-bench.git", rev = "f8605e6" }
+quail-b = { git = "https://github.com/fsdatalab/quail-bench.git", rev = "8498d19" }
 
 [build-system]
 requires = ["hatchling==1.32.0"]
@@ -104,7 +104,7 @@ ignore = ["D1", "N803", "N806", "N812"]
 convention = "google"
 
 [tool.ruff.lint.isort]
-known-first-party = ["quail", "quail_b", "bench", "experiments"]
+known-first-party = ["quail", "quail_b", "bench", "calibrate", "experiments"]
 
 # Each package imports only the packages below it. `uv run lint-imports`
 # checks the contract; the one exception is the lazy import that lets
@@ -152,5 +152,5 @@ layers = [
 ]
 
 [tool.vulture]
-paths = ["quail", "bench"]
+paths = ["quail", "bench", "calibrate"]
 min_confidence = 70
