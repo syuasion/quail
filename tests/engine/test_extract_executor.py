@@ -410,13 +410,11 @@ def _setup(monkeypatch, documents=None, token_documents=None,
 
 def test_extraction_borrows_prefix_pages_and_keeps_decode_kv(monkeypatch):
     documents = [LEASE, LEASE, NOTHING]
-    # runs that keep KV ask every copy, so the second lease borrows the
-    # first one's pages
     _, _, plain, _ = _setup(monkeypatch, documents=documents)
-    unshared, _ = plain(keep_kv=True)
+    unshared, _ = plain()
     _, model, shared, _ = _setup(
         monkeypatch, documents=documents, share_prefixes=True)
-    result, stages = shared(keep_kv=True)
+    result, stages = shared()
     assert result.outputs["rows:c"].table().equals(unshared.outputs["rows:c"].table())
     borrowed = result.metrics.extension["borrowed_prefix_tokens"]
     assert borrowed > 0
@@ -428,18 +426,6 @@ def test_extraction_borrows_prefix_pages_and_keeps_decode_kv(monkeypatch):
         assert model.reads[document.key] <= 1
         assert all(entry[2] > 0 for entry in rounds)
 
-
-
-def test_an_extraction_asks_each_repeated_document_once(monkeypatch):
-    _, model, run, _ = _setup(monkeypatch, documents=[LEASE, TERM, LEASE])
-    result, _ = run()
-    table = result.outputs["rows:c"]
-    assert table.ids["c"].to_pylist() == [0, 1, 2]
-    assert table.column("ends").to_pylist() == [GOLD[0], GOLD[1], GOLD[0]]
-    spans = table.column("ends_span").to_pylist()
-    assert spans[2] == spans[0] is not None
-    assert {entry[0] for entry in model.packed} == {("c", 0), ("c", 1)}
-    assert result.metrics.extension["copied_documents"] == 1
 
 
 def test_extraction_accepts_empty_input_and_sparse_document_ids(monkeypatch):

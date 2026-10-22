@@ -5,7 +5,6 @@ from functools import partial
 
 import numpy as np
 
-from quail.backends.quail.executor.copies import Copies
 from quail.backends.quail.executor.parts import (
     ExecutionPart,
     execute_parts,
@@ -27,7 +26,6 @@ from quail.catalog.tokens import (
     DocumentKeys,
     DocumentPrefixes,
     concat_tokens,
-    first_copies,
     select_documents,
 )
 from quail.execution.ids import id_positions
@@ -69,8 +67,7 @@ class JoinPart(ExecutionPart):
             first.document_head, context.state["documents"][nodes[0].anchor], ids)
         upstream = {"documents": prefixes, "document_ids": ids, "parts": tuple(parts),
                  "pairs": {part.node.written_position: part.rows for part in parts
-                           if isinstance(part, ApplyGate) and part.node.ids == "pairs"},
-                 "copies": parts[0].copies if parts else None}
+                           if isinstance(part, ApplyGate) and part.node.ids == "pairs"}}
         prepared = context.model_inputs(
             nodes[0], inputs, context, upstream, nodes=nodes)
         return cls(state, nodes, prepared, ids, context=context)
@@ -80,7 +77,6 @@ class JoinPart(ExecutionPart):
         self.node = nodes[0]
         self.inputs = inputs
         self.ids = ids
-        self.copies = inputs.get("copies")
         self.context = context
         self.canvas_tokens = len(state.loaded_model.pipeline.canvas_ids)
         self.attention = self.node.attention or None
@@ -154,14 +150,6 @@ class JoinPart(ExecutionPart):
         kv_round = self.kv_round
         group = inputs["group"]
         partner_lists = stage_partner_lists(group, lists_for, anchor_ids)
-        copied_documents = 0
-        if self.copies is not None:
-            asked = len(anchor_ids)
-            anchor_ids, rows, members = copied_rows(
-                self.copies, anchor_ids, answers[0], partner_lists[0],
-                inputs["copy_partners"], inputs["first_partners"])
-            answers, partner_lists = [rows], [members]
-            copied_documents = len(anchor_ids) - asked
         results = {}
         own_tokens[0] = tokens - sum(own_tokens[1:])
         for j, (member, rows, members) in enumerate(zip(nodes, answers, partner_lists)):
@@ -206,8 +194,6 @@ class JoinPart(ExecutionPart):
                            if j == 0 and stats.get("borrowed_tokens") else {}),
                         **({"pack_s": round(stats["pack_s"], 3)}
                            if j == 0 and stats.get("pack_s") else {}),
-                        **({"copied_documents": copied_documents}
-                           if j == 0 and copied_documents else {}),
                     }))
         self._results = results
         self.result_value = results[node.node_id]
@@ -365,84 +351,6 @@ def stage_partner_lists(group, lists_for, anchor_ids) -> list:
     return out
 
 
-def shared_partner_lists(lists_for, copies, first_partners):
-    """Per asked anchor, the partners its copies stream, each text once.
-
-    Args:
-        lists_for: Callable(anchor id, stage) -> the anchor's own
-            partners, or None for every partner.
-        copies: The Copies of the anchors.
-        first_partners: Per partner, the first partner with its tokens.
-
-    Returns:
-        A callable like lists_for over the asked anchors.
-    """
-    merged = {}
-
-    def lists_for_asked(anchor, stage):
-        key = (int(anchor), stage)
-        if key not in merged:
-            own = [lists_for(copy, stage) for copy in copies.ids_of(anchor).tolist()]
-            merged[key] = (None if any(members is None for members in own)
-                           else np.unique(first_partners[np.concatenate(own)])
-                           .astype(np.int64))
-        return merged[key]
-
-    return lists_for_asked
-
-
-def copied_rows(copies, anchor_ids, rows, members, copy_partners, first_partners):
-    """Give every copy of an asked anchor the answers of its own partners.
-
-    Args:
-        copies: The Copies of the anchors.
-        anchor_ids: The asked anchors' ids, in local order.
-        rows: Asked anchor local index -> answers over its partner list.
-        members: Asked anchor local index -> its partner list, or None
-            when every anchor streams every partner.
-        copy_partners: Callable(anchor id, stage) -> the anchor's own
-            partners, or None for every partner.
-        first_partners: Per partner, the first partner with its tokens.
-
-    Returns:
-        (every copy's id, copy local index -> answers, copy local index
-        -> its own partners, or None when members is None).
-    """
-    ids, copy_rows = [], {}
-    copy_members = None if members is None else {}
-    for local, anchor in enumerate(anchor_ids):
-        row = rows.get(local)
-        for copy in copies.ids_of(anchor).tolist():
-            position = len(ids)
-            ids.append(copy)
-            own = None if members is None else copy_partners(copy, 0)
-            if copy_members is not None:
-                copy_members[position] = own
-            if row is None:
-                continue
-            if own is None:
-                copy_rows[position] = row
-                continue
-            asked = members[local]
-            picks = (np.asarray(own, dtype=np.int64) if asked is None
-                     else np.searchsorted(asked, first_partners[own]))
-            copy_rows[position] = (row[picks] if isinstance(row, np.ndarray)
-                                   else [row[pick] for pick in picks.tolist()])
-    return ids, copy_rows, copy_members
-
-
-def join_copies(nodes, prefixes, anchor_ids) -> "Copies | None":
-    """Return the copies among one join's anchors, or None.
-
-    A group of several predicates or one that keeps anchor KV asks
-    every anchor: a copy could reach a later predicate its own
-    partners never let it reach, or need KV under its own key.
-    """
-    if len(nodes) != 1 or nodes[-1].keep_kv:
-        return None
-    return Copies.of(prefixes, anchor_ids)
-
-
 def prepare_join_inputs(node, inputs, context: ExecutionContext, upstream=None,
                         nodes=None) -> dict:
     """Prepare join requests from graph ports and preceding operator state."""
@@ -486,16 +394,8 @@ def prepare_join_inputs(node, inputs, context: ExecutionContext, upstream=None,
     prefixes = (DocumentPrefixes(node.document_head, state["documents"][node.anchor],
                                  by_alias[node.anchor])
                 if upstream is None else upstream["documents"])
-    copies = (join_copies(nodes, prefixes, by_alias[node.anchor])
-              if upstream is None else upstream["copies"])
-    if upstream is None and copies is not None:
-        by_alias[node.anchor] = copies.asked_ids.tolist()
-        prefixes = DocumentPrefixes(node.document_head,
-                                    state["documents"][node.anchor],
-                                    by_alias[node.anchor])
     prepared = join_inputs(nodes, documents, by_alias, prefixes, state["gpu"].arena,
-                           config, port_pairs, upstream=upstream, report_answers=True,
-                           copies=copies)
+                           config, port_pairs, upstream=upstream, report_answers=True)
     if upstream is None:
         counts = prepared["kv_round"]
         state["kv_stats"]["join_anchor_hits"] += counts["hits"]
@@ -505,24 +405,16 @@ def prepare_join_inputs(node, inputs, context: ExecutionContext, upstream=None,
 
 
 def join_inputs(nodes, documents, indices, prefixes, arena, retention, pair_tables,
-                *, upstream=None, report_answers=False, copies=None) -> dict:
-    """Build join requests and KV settlement for local or worker execution.
-
-    With copies, the anchors are the asked ones: each streams the
-    partners of all its copies, each partner text once.
-    """
+                *, upstream=None, report_answers=False) -> dict:
+    """Build join requests and KV settlement for local or worker execution."""
     node = nodes[0]
     group = [join_request(member) for member in nodes]
     stage_suffixes, tuple_indices = join_suffixes(group, documents, indices)
     streamed_pairs = {} if upstream is None else upstream["pairs"]
     maps = partner_maps(group, pair_tables, streamed=streamed_pairs)
     maps.update(streamed_pairs)
-    own_lists = partner_list_builder(
+    lists_for = partner_list_builder(
         group, [tuple_indices[stage.written_position] for stage in nodes], maps)
-    lists_for, first_partners = own_lists, None
-    if copies is not None and own_lists is not None:
-        first_partners = first_copies(stage_suffixes[0])
-        lists_for = shared_partner_lists(own_lists, copies, first_partners)
     anchor_ids = indices[node.anchor] if upstream is None else None
     anchor_keys = DocumentKeys(node.anchor, anchor_ids if upstream is None
                                else upstream["document_ids"])
@@ -537,8 +429,8 @@ def join_inputs(nodes, documents, indices, prefixes, arena, retention, pair_tabl
         false; ``asked`` says how many pairs that covers.
         """
         members = None
-        if own_lists is not None and runs_over_pairs(last):
-            members = own_lists(document, len(group) - 1)
+        if lists_for is not None and runs_over_pairs(last):
+            members = lists_for(document, len(group) - 1)
         matches = []
         for position, answer in enumerate(row):
             if answer:
@@ -555,16 +447,8 @@ def join_inputs(nodes, documents, indices, prefixes, arena, retention, pair_tabl
         key = anchor_keys[local_index]
         settle(local_index, row)
         sink = answer_sink() if report_answers else None
-        if sink is None:
-            return
-        if copies is None:
+        if sink is not None:
             sink(finished_answers(key[1], row))
-            return
-        members = None if lists_for is None else {0: lists_for(key[1], 0)}
-        ids, rows, _ = copied_rows(copies, [key[1]], {0: row}, members,
-                                   own_lists, first_partners)
-        for position, copy in enumerate(ids):
-            sink(finished_answers(copy, rows[position]))
 
     return {
         "prefixes": prefixes,
@@ -578,7 +462,4 @@ def join_inputs(nodes, documents, indices, prefixes, arena, retention, pair_tabl
         "partner_indices": tuple_indices,
         "anchor_partners": lists_for,
         "group": group,
-        "copies": copies,
-        "copy_partners": own_lists,
-        "first_partners": first_partners,
     }

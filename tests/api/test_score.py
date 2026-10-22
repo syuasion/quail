@@ -857,39 +857,3 @@ def test_reranker_prompts_render_stored_documents_and_the_ai_if_frame(catalog):
             assert [list(tokens) for tokens in model_execution.reranker.prompts] \
                 == expected, case
             session.close()
-
-
-def test_a_score_asks_each_repeated_document_once(monkeypatch):
-    from quail.backends.quail.executor import parts as executor_parts
-    from quail.backends.quail.executor.operators import score as module
-    from quail.catalog.tokens import TokenView
-
-    documents = {"b": [TokenView(pa.array([20], type=pa.int32())),
-                       TokenView(pa.array([30], type=pa.int32()))]}
-    spec = SimpleNamespace(name="score", aliases=("b",), draws=1,
-                           share_prefixes=False, prompt_token_parts=((1,), (2,)))
-    state = QueryExecutionState(
-        loaded_model=LoadedModelState(
-            model_spec=QWEN3_4B_FP8, arena=object(), pipeline=object(),
-            model=object()),
-        torch=object(), answer_rows=object(), chunk_tokens=1234,
-        async_answers=fake_readout())
-    monkeypatch.setattr(module, "AsyncScores", lambda *args: fake_readout())
-
-    def run_stages(torch, arena, pipeline, stages, prefixes, budget, **kwargs):
-        (stage,) = stages
-        # rows 0, 2, and 3 hold one document: two rows are asked
-        assert [list(part) for part in stage.suffixes] == [[20, 2], [30, 2]]
-        kwargs["on_answers"](0, 0, 0, 2, [0.9, 0.2])
-        return [{0: [0.9, 0.2]}], [], 6
-
-    monkeypatch.setattr(executor_parts, "run_stages", run_stages)
-    streamed = {}
-    result = module.QuailScorer(state).score(
-        spec, [(0,), (1,), (0,), (0,)], documents,
-        on_answers=lambda positions, values: streamed.update(
-            zip(positions.tolist(), values)))
-    np.testing.assert_allclose(result.scores, [0.9, 0.2, 0.9, 0.9])
-    assert sorted(streamed) == [0, 1, 2, 3]
-    np.testing.assert_allclose([streamed[row] for row in range(4)],
-                               [0.9, 0.2, 0.9, 0.9])

@@ -5,14 +5,12 @@ title: KV
 The model computes key and value vectors when it processes a token.
 Quail saves the vectors in GPU memory as *KV* for reuse in later requests.
 
-This page explains four forms of reuse:
+This page explains three forms of reuse:
 
 - **KV rewind** reuses one document's KV for successive questions or
   join partners.
 - **Prefix sharing** reuses KV between documents that begin with the
   same tokens.
-- **Repeated documents** asks a question once for rows with the same
-  tokens, and gives every row that answer.
 - **KV retention** keeps document KV available across separate operators.
 
 See [Execution](/docs/architecture/execution) for how requests use KV
@@ -120,33 +118,6 @@ Sharing has these limits:
 See
 [`Borrowing`](https://github.com/fsdatalab/quail/blob/main/quail/backends/quail/executor/admission.py)
 for admission decisions.
-
-## Repeated documents
-
-Rows of a table can hold the same text under different ids. For
-example, imagine a table of same-hotel review pairs: a hotel with 100
-reviews has 4,950 pairs, so each review appears in 99 rows. Prefix
-sharing lets those rows borrow the review's KV, but each row would
-still ask the question after it.
-
-Quail groups an operator's rows by their prompt tokens and asks each
-group once. Every row keeps its own id and takes its group's answer:
-
-- A filter, classification, score, or extraction asks one row per
-  group. An extraction also needs the same text, since its span is a
-  place in the text.
-- A join merges the anchor rows of a group into one anchor that
-  streams the partners of every row, each partner text once. Each row
-  then takes the answers of its own partners, and survives by them.
-- A filter that streams into a join does both: the merged anchor asks
-  the filter once, then streams every row's partners.
-
-Rows of one group are asked separately when the run keeps KV for a
-later operator, stops at a row limit, reads stop key groups, holds a
-join of several predicates, or chains a classification or extraction
-with other operators in one pipeline. A classification or score on a model
-that draws a canvas per row also asks every row, since its seed is the
-row.
 
 ## KV retention
 

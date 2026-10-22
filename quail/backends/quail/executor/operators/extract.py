@@ -6,7 +6,6 @@ from dataclasses import replace
 import numpy as np
 import pyarrow as pa
 
-from quail.backends.quail.executor.copies import Copies
 from quail.backends.quail.executor.extract import (
     ExtractionStages,
     load_vocabulary,
@@ -48,10 +47,7 @@ def execute_extractions(state: QueryExecutionState, nodes, inputs) -> dict:
     """
     state.gpu_timing = bool(inputs.get("gpu_timing", False))
     started = time.perf_counter()
-    copies = (None if nodes[-1].keep_kv or inputs.get("limit") is not None
-              else extraction_copies(nodes[0].spec.alias, inputs))
-    part = ExtractPart(state, nodes, inputs["document_ids"] if copies is None
-                       else copies.asked_ids, inputs)
+    part = ExtractPart(state, nodes, inputs["document_ids"], inputs)
     stages = part.extraction
     tree = (shared_prefix_tree(nodes[0].spec.name, stages.prefixes,
                                state.loaded_model.arena)
@@ -60,62 +56,10 @@ def execute_extractions(state: QueryExecutionState, nodes, inputs) -> dict:
         state, [part], stages.prefixes, stages.keys,
         keep_kv=nodes[-1].keep_kv, prefix_tree=tree, limit=inputs.get("limit"),
         label=f"extract {', '.join(node.spec.name for node in nodes)}")
-    if copies is not None:
-        results = copied_extractions(results, nodes, copies)
     first = nodes[0].node_id
     results[first] = replace(results[first], metrics=replace(
         results[first].metrics, wall_s=time.perf_counter() - started))
     return results
-
-
-def extraction_copies(alias, inputs) -> Copies | None:
-    """Return the documents whose tokens and text repeat an earlier one's.
-
-    A span is a place in the text, so a copy needs the same text too.
-    """
-    ids = np.asarray(inputs["document_ids"])
-    documents = inputs["documents"][alias]
-    copies = Copies.of([documents[document] for document in ids.tolist()], ids)
-    texts = inputs.get("texts", {}).get(alias)
-    if copies is None or texts is None:
-        return copies
-    for document, asked in zip(ids.tolist(), copies.asked.tolist()):
-        if texts[document] != texts[int(copies.asked_ids[asked])]:
-            return None
-    return copies
-
-
-def copied_extractions(results, nodes, copies) -> dict:
-    """Give every copy the answer row of the asked document with its tokens.
-
-    Args:
-        results: Node id -> NodeResult over the asked documents.
-        nodes: The AiExtract nodes.
-        copies: The Copies of the documents.
-    """
-    copied = dict(results)
-    for node in nodes:
-        result = results[node.node_id]
-        rows = result.outputs[node.rows_port]
-        alias = node.spec.alias
-        held = {document: index for index, document
-                in enumerate(rows.ids[alias].to_pylist())}
-        picks, ids = [], []
-        for position, asked in enumerate(copies.asked.tolist()):
-            index = held.get(int(copies.asked_ids[asked]))
-            if index is not None:
-                picks.append(index)
-                ids.append(int(copies.ids[position]))
-        answers = Rows({alias: ids}, rows.take(picks).values)
-        metrics = result.metrics
-        copied[node.node_id] = replace(
-            result, outputs={**result.outputs, node.rows_port: answers},
-            metrics=replace(
-                metrics, input_rows=len(copies.ids), output_rows=len(ids),
-                evaluated_documents=len(ids),
-                extension={**metrics.extension,
-                           "copied_documents": len(ids) - len(rows)}))
-    return copied
 
 
 def extraction_results(nodes, stages, document_ids, *, fresh, own,

@@ -3,7 +3,6 @@
 import numpy as np
 import pyarrow as pa
 
-from quail.backends.quail.executor.copies import Copies
 from quail.backends.quail.executor.parts import (
     SingleResultPart,
     execute_parts,
@@ -16,6 +15,7 @@ from quail.catalog.selection import group_ids
 from quail.catalog.tokens import (
     DocumentKeys,
     DocumentPrefixes,
+    first_copies,
 )
 from quail.execution.ids import document_ids as arrow_ids
 from quail.execution.ids import id_positions
@@ -37,17 +37,18 @@ def execute_filters(state: QueryExecutionState, nodes, inputs) -> dict:
     copies = None
     if (not nodes[-1].keep_kv and inputs.get("limit") is None
             and inputs.get("stop_groups") is None):
-        copies = Copies.of(documents, ids)
-    if copies is not None:
-        documents = [documents[position] for position in copies.asked_rows]
-        ids = copies.asked_ids
+        first = first_copies(documents)
+        asked = np.flatnonzero(first == np.arange(len(first)))
+        if len(asked) < len(first):
+            # each document's position among the asked ones
+            copies = (ids, np.searchsorted(asked, first))
+            documents = [documents[position] for position in asked]
+            ids = ids[asked]
     parts = [FilterPart(member, ids, state.async_answers,
-                        len(state.loaded_model.pipeline.canvas_ids))
+                        len(state.loaded_model.pipeline.canvas_ids),
+                        copies=copies)
              for member in nodes]
-    if copies is not None:
-        for part in parts:
-            part.share_answers(copies)
-    elif len(parts) == 1 and "document_done" in inputs:
+    if len(parts) == 1 and "document_done" in inputs and copies is None:
         parts[0].document_done = inputs["document_done"]
     # the rows a limit keeps follow admission order, which borrowing
     # sorts by prefix; a query without ORDER BY promises no rows
@@ -78,24 +79,18 @@ class FilterPart(SingleResultPart):
         return cls(nodes[0], ids, state.async_answers,
                    len(state.loaded_model.pipeline.canvas_ids))
 
-    def __init__(self, node, ids, async_answers, canvas_tokens=0):
+    def __init__(self, node, ids, async_answers, canvas_tokens=0, copies=None):
         self.node = node
         self.ids = ids
         self.canvas_tokens = canvas_tokens
+        # (every document id, each one's position in ids), or None
+        self.copies = copies
         self.stages = filter_stages(
             [list(node.question_token_ids)],
             async_answers)
-        self.document_done = filter_document_sink(node, ids)
+        self.document_done = (filter_document_sink(node, ids) if copies is None
+                              else filter_document_sink(node, *copies))
         self.answers = {}
-
-    def share_answers(self, copies):
-        """Give each row the answers of the asked row with its prompt tokens.
-
-        Args:
-            copies: The Copies whose asked rows are this part's ids.
-        """
-        self.copies = copies
-        self.document_done = filter_document_sink(self.node, copies.ids, copies)
 
     @staticmethod
     def prepare_group(parts):
@@ -118,9 +113,9 @@ class FilterPart(SingleResultPart):
     def result(self, tokens, gpu_s, chunks, stats) -> NodeResult:
         answers, ids = self.answers, self.ids
         if self.copies is not None:
-            ids = self.copies.ids
+            ids, asked = self.copies
             answers = {position: self.answers[index]
-                       for position, index in enumerate(self.copies.asked.tolist())
+                       for position, index in enumerate(asked.tolist())
                        if index in self.answers}
         return filter_result(
             self.node, answers, tokens, ids, gpu_s=gpu_s,
@@ -229,7 +224,7 @@ def filter_result(node, answers, tokens, document_ids,
     )
 
 
-def filter_document_sink(node, document_ids, copies=None):
+def filter_document_sink(node, document_ids, asked=None):
     """The sequence's document_done callback, or None when nobody listens.
 
     Reports each chunk's finished documents to the answer sink as
@@ -241,21 +236,26 @@ def filter_document_sink(node, document_ids, copies=None):
     Args:
         node: The AiFilter.
         document_ids: Every document's id.
-        copies: The Copies whose asked rows the scheduler reports, when
+        asked: Each document's position among the asked documents, when
             copies take their answers; None when every document is asked.
     """
     sink = answer_sink()
     if sink is None:
         return None
     stages = 1
+    copies = None
+    if asked is not None:
+        copies = [[] for _ in range(int(asked.max()) + 1)]
+        for position, index in enumerate(asked.tolist()):
+            copies[index].append(position)
 
     def document_done(finished):
         sink({"kind": "filter", "node": node.node_id, "alias": node.alias,
               "stages": stages,
-              "documents": [[int(document_ids[row]), stage, passed]
+              "documents": [[int(document_ids[copy]), stage, passed]
                             for position, stage, passed in finished
-                            for row in ((position,) if copies is None
-                                        else copies.rows_of(position))]})
+                            for copy in ((position,) if copies is None
+                                         else copies[position])]})
 
     return document_done
 

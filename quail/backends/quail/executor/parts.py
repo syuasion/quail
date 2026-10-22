@@ -71,8 +71,6 @@ class ExecutionPart(ABC):
     frame_tokens = 0
     on_settled = None
     attention = None
-    # the Copies whose asked rows the part runs, or None for every row
-    copies = None
 
     @classmethod
     def prepare(cls, state, nodes, ids, parts, inputs, context):
