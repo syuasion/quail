@@ -300,12 +300,8 @@ def two_alias_graph(pipelined, *, stages=1, hash_join=False, foreign=None,
 
 def run_graph_on_arena(monkeypatch, graph, *, num_documents=14, num_partners=4,
                        seed=5, pages=64, stages=1, partner_tokens=20,
-                       streamed_anchors=True, shared_prefix=0, num_distinct=None,
-                       **extra):
+                       streamed_anchors=True, shared_prefix=0, **extra):
     """Run a graph over random documents through the real graph runtime.
-
-    Document d of r repeats document d % num_distinct, tokens and filter
-    truth alike, when num_distinct is given.
 
     Returns:
         (result, model, filter_truth, join_truth); the arena is empty
@@ -324,11 +320,6 @@ def run_graph_on_arena(monkeypatch, graph, *, num_documents=14, num_partners=4,
         ("r", d): [1 if rng.random() < 0.5 else 0 for _ in range(num_partners)]
         for d in range(num_documents)
     }
-    if num_distinct is not None:
-        documents["r"] = [documents["r"][d % num_distinct]
-                          for d in range(num_documents)]
-        filter_truth = [filter_truth[d % num_distinct]
-                        for d in range(num_documents)]
     model = FakeModel(filter_truth, join_truth, streamed_anchors)
     torch = fake_torch()
     arena = cpu_arena(pages)

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import bisect
-import hashlib
 from collections.abc import Sequence
 from contextlib import ExitStack
 from pathlib import Path
@@ -765,29 +764,6 @@ def _array_common_prefix(left, right) -> int:
     differ = left[:limit] != right[:limit]
     first = int(differ.argmax())
     return first if differ[first] else limit
-
-
-def first_copies(documents) -> np.ndarray:
-    """Return, per document, the position of the first document with its tokens.
-
-    Args:
-        documents: Token sequences, indexable by position.
-
-    Returns:
-        An int64 array; a document that repeats no earlier one holds
-        its own position.
-    """
-    first = np.arange(len(documents), dtype=np.int64)
-    seen = {}
-    for position in range(len(documents)):
-        tokens = _token_array(documents[position])
-        digest = hashlib.blake2b(tokens.tobytes(), digest_size=16).digest()
-        earlier = seen.setdefault(digest, position)
-        # a digest collision keeps the documents apart
-        if earlier != position and np.array_equal(
-                tokens, _token_array(documents[earlier])):
-            first[position] = earlier
-    return first
 
 
 def prefix_tree(documents, page_tokens: int) -> PrefixTree:
