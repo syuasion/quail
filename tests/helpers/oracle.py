@@ -14,6 +14,7 @@ import pyarrow as pa
 
 from quail.backends.base import GpuContext
 from quail.backends.quail.executor.operators.filter import filter_result
+from quail.backends.quail.executor.operators.join import copied_rows
 from quail.backends.quail.reranker import (
     RerankerBatch,
     RerankerModelExecution,
@@ -111,6 +112,12 @@ class Oracle:
             if inputs.get("anchor_done") is not None:
                 for local, row in rows.items():
                     inputs["anchor_done"](local, row)
+            if inputs.get("copies") is not None:
+                # each copy of an asked anchor takes its own pairs' answers
+                anchor_ids, rows, members = copied_rows(
+                    inputs["copies"], anchor_ids, rows, members,
+                    inputs["copy_partners"], inputs["first_partners"])
+                survivors = set(range(len(anchor_ids)))
             passing = {local for local, row in rows.items() if any(row)}
             survivors = (survivors - passing if node.semantics == "anti"
                          else passing)

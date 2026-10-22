@@ -780,12 +780,17 @@ def first_copies(documents) -> np.ndarray:
     first = np.arange(len(documents), dtype=np.int64)
     seen = {}
     for position in range(len(documents)):
-        tokens = _token_array(documents[position])
-        digest = hashlib.blake2b(tokens.tobytes(), digest_size=16).digest()
-        earlier = seen.setdefault(digest, position)
+        try:
+            tokens = _token_array(documents[position])
+        except (TypeError, ValueError):
+            # Test tokenizers may return words instead of integer token IDs.
+            tokens, key = None, tuple(documents[position])
+        else:
+            key = hashlib.blake2b(tokens.tobytes(), digest_size=16).digest()
+        earlier = seen.setdefault(key, position)
         # a digest collision keeps the documents apart
-        if earlier != position and np.array_equal(
-                tokens, _token_array(documents[earlier])):
+        if earlier != position and (tokens is None or np.array_equal(
+                tokens, _token_array(documents[earlier]))):
             first[position] = earlier
     return first
 

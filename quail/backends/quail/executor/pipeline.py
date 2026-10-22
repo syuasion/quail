@@ -2,6 +2,7 @@
 
 from itertools import groupby
 
+from quail.backends.quail.executor.copies import Copies
 from quail.backends.quail.executor.operators import execution_parts
 from quail.backends.quail.executor.parts import execute_parts, execution_prefix_tree
 from quail.backends.quail.executor.state import QueryExecutionState
@@ -35,11 +36,19 @@ def execute_pipeline(state: QueryExecutionState, nodes, inputs, context) -> dict
         implementation = implementations[node.type_name]
         return node.type_name, None if implementation.combine else node.node_id
 
+    copies = pipeline_copies(nodes, DocumentPrefixes(
+        first.document_head, context.state["documents"][alias], ids), ids,
+        context.state.get("filter_limit"))
+    if copies is not None:
+        ids = copies.asked_ids
     parts = []
     for _, group in groupby(nodes, group_key):
         members = list(group)
-        parts.append(implementations[members[0].type_name].prepare(
-            state, members, ids, parts, inputs, context))
+        part = implementations[members[0].type_name].prepare(
+            state, members, ids, parts, inputs, context)
+        if copies is not None and isinstance(members[0], AiFilter):
+            part.share_answers(copies)
+        parts.append(part)
     prefixes = DocumentPrefixes(
         first.document_head, context.state["documents"][alias], ids
     )
@@ -53,3 +62,20 @@ def execute_pipeline(state: QueryExecutionState, nodes, inputs, context) -> dict
         attention=(first.attention or None
                    if isinstance(first, (AiFilter, AiJoin)) else None),
         label=f"pipeline {alias}")
+
+
+def pipeline_copies(nodes, documents, ids, limit) -> Copies | None:
+    """Return the copies among a pipeline's documents, or None.
+
+    Filters followed by at most one join of one predicate share a
+    copy's answers: each asked document streams the join partners of
+    all its copies. Other operators, a limit, or KV kept for a later
+    operator ask every document.
+    """
+    if not all(isinstance(node, (AiFilter, AiJoin)) for node in nodes):
+        return None
+    joins = [node for node in nodes if isinstance(node, AiJoin)]
+    if (limit is not None or len(joins) > 1 or nodes[-1].keep_kv
+            or (joins and nodes[-1] is not joins[0])):
+        return None
+    return Copies.of(documents, ids)

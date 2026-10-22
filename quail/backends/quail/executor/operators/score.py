@@ -1,7 +1,10 @@
 """Numeric reranker scores through Quail's forward loop."""
 
+from dataclasses import replace
+
 import numpy as np
 
+from quail.backends.quail.executor.copies import Copies
 from quail.backends.quail.executor.operators.classify import QuailClassifier
 from quail.backends.quail.executor.parts import (
     AnswerStream,
@@ -18,6 +21,24 @@ from quail.physical import ClassifySpec
 from quail.specs.base import CANVAS_ENTROPY_NATS, CANVAS_SEED
 
 
+def row_copies(spec, rows, documents) -> Copies | None:
+    """Return the rows whose documents repeat an earlier row's, or None.
+
+    Args:
+        spec: Score or classification specification.
+        rows: Document indices, one column per alias.
+        documents: Tokenized documents indexed by table alias and document ID.
+    """
+    rows = np.asarray(rows).reshape(len(rows), -1)
+    texts = []
+    for row in rows.tolist():
+        parts = [documents[alias][document] for alias, document
+                 in zip(spec.aliases, row)]
+        # the lengths keep two documents from reading as one split elsewhere
+        texts.append(concat_tokens([len(part) for part in parts], *parts))
+    return Copies.of(texts, np.arange(len(rows)))
+
+
 class QuailScorer:
     """Score document rows with Quail's token admission and KV arena."""
 
@@ -30,6 +51,10 @@ class QuailScorer:
     def score(self, spec, rows, documents, on_answers=None):
         """Score or classify the rows.
 
+        Rows whose documents have identical tokens are asked once, and
+        each copy takes that answer, unless the model draws a canvas
+        seeded by each row.
+
         Args:
             spec: Score or classification specification.
             rows: Document indices, one column per alias.
@@ -40,6 +65,26 @@ class QuailScorer:
         Returns:
             A RerankerBatch with one value per row, in row order.
         """
+        rows = np.asarray(rows, dtype=np.int32)
+        canvas = getattr(self.state.loaded_model.pipeline, "canvas_ids", ())
+        copies = None if canvas else row_copies(spec, rows, documents)
+        if copies is None:
+            return self._score_rows(spec, rows, documents, on_answers)
+        report = None
+        if on_answers is not None:
+            def report(positions, values):
+                copied = [copies.rows_of(int(position)) for position in positions]
+                on_answers(np.concatenate(copied),
+                           [value for value, rows_of in zip(values, copied)
+                            for _ in rows_of])
+        batch = self._score_rows(spec, rows[copies.asked_rows], documents, report)
+        return replace(
+            batch, scores=batch.scores[copies.asked],
+            probabilities=(None if batch.probabilities is None
+                           else batch.probabilities[copies.asked]))
+
+    def _score_rows(self, spec, rows, documents, on_answers):
+        """Score or classify every row, in row order."""
         if isinstance(spec, ClassifySpec):
             return QuailClassifier(self.state).classify(
                 spec, rows, documents, on_answers=on_answers)

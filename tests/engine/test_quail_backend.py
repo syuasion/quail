@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pyarrow as pa
 import pytest
 from helpers.fakes import (
+    FRAME,
+    PARTNER,
     QUESTION,
     FakeArena,
     fake_pipeline,
@@ -327,3 +329,50 @@ def test_a_filter_asks_each_repeated_document_once(monkeypatch):
     metrics = result["node_metrics"]["filter:r"]
     assert metrics["input_rows"] == 14
     assert metrics["copied_documents"] == 10
+
+
+@pytest.mark.parametrize("pipelined", [True, False])
+def test_a_join_asks_each_repeated_anchor_once_with_every_copys_partners(
+        monkeypatch, pipelined):
+    # documents d, d + 4, d + 8, and d + 12 hold one text but have keys
+    # d % 3, so each copy pairs with its own partners
+    columns = _key_columns([d % 3 for d in range(14)], [0, 1, 2, 0])
+    allowed = {d: [i for i in range(4) if d % 3 == i % 3] for d in range(14)}
+    result, model, filter_truth, join_truth = run_graph_on_arena(
+        monkeypatch, two_alias_graph(pipelined, hash_join=True),
+        columns=columns, num_distinct=4)
+    asked = {kind: {int(spec["key"][1]) for launched, specs in model.launched
+                    if launched == kind for spec in specs}
+             for kind in ("filter", "join")}
+    assert asked["join"] <= {0, 1, 2, 3}
+    # a filter that keeps its KV for the join asks every row
+    assert asked["filter"] == (
+        {0, 1, 2, 3} if pipelined else set(range(14)))
+    survivors = [d for d, truth in enumerate(filter_truth) if all(truth)]
+    stage = result["joins"][0]
+    assert sorted(stage["anchor_index"]) == survivors
+    for local, document in enumerate(stage["anchor_index"]):
+        assert list(stage["anchor_partners"][local]) == allowed[document]
+        assert list(stage["rows"].get(local, [])) == [
+            join_truth[("r", document)][i] for i in allowed[document]]
+    table = result["_outputs"][PortRef("group:0", "join_answers:0")]
+    assert _pairs(table) == sorted(
+        (d, i) for d in survivors for i in allowed[d])
+
+
+def test_a_merged_anchor_asks_each_partner_text_once(monkeypatch):
+    # partners 2 and 3 repeat partners 0 and 1, and every document pairs
+    # with all four: an asked anchor streams two partners, not four
+    columns = _key_columns([0] * 14, [0, 0, 0, 0])
+    result, model, filter_truth, join_truth = run_graph_on_arena(
+        monkeypatch, two_alias_graph(True, hash_join=True), columns=columns,
+        num_distinct=4, num_distinct_partners=2)
+    streamed = [suffix[0] for _, specs in model.launched for spec in specs
+                for suffix in spec["suffixes"] if PARTNER <= suffix[0] < FRAME]
+    survivors = {d % 4 for d, truth in enumerate(filter_truth) if all(truth)}
+    assert sorted(streamed) == sorted(
+        PARTNER + i for _ in survivors for i in (0, 1))
+    stage = result["joins"][0]
+    for local, document in enumerate(stage["anchor_index"]):
+        assert list(stage["rows"].get(local, [])) == [
+            join_truth[("r", document)][i] for i in range(4)]
