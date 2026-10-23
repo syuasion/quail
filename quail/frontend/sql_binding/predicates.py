@@ -15,7 +15,7 @@ from sqlglot import exp
 from quail.logical import ColumnRef, CompileError, RegularPredicate
 from quail.logical.expressions import SPAN_SUFFIX, column_expression
 
-PLAIN_COMPARISONS = {
+_PLAIN_COMPARISONS = {
     exp.EQ: "=",
     exp.NEQ: "<>",
     exp.LT: "<",
@@ -173,7 +173,7 @@ def parse_plain_test(term, dialect: str) -> PlainTest | None:
         raise CompileError(
             f"NOT is supported as NOT EXISTS, IS NOT NULL, and NOT before "
             f"a text test, got NOT {node.sql()}")
-    comparison = PLAIN_COMPARISONS.get(type(node))
+    comparison = _PLAIN_COMPARISONS.get(type(node))
     if comparison is not None:
         left, right = _operand(node.this), _operand(node.expression)
         if left is not None and right is None:
