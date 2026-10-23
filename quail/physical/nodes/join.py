@@ -214,11 +214,6 @@ class HashJoin(PhysicalNode):
     location: ClassVar[ExecutionLocation] = ExecutionLocation.GPU_EXECUTOR
 
     @property
-    def alias(self) -> str:
-        """The table whose documents an answer join fills, as a filter names it."""
-        return self.left
-
-    @property
     def outputs(self) -> tuple[OutputPort, ...]:
         if self.ports:
             return self.ports

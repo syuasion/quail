@@ -668,13 +668,11 @@ class TokenStore(Sequence):
         """
         if not columns:
             return self.first_documents
-        hashes = self.text_hashes
-        halves = [hashes.column(name).to_numpy().copy()
-                  for name in TEXT_HASH_COLUMNS]
-        groups = group_ids(columns).astype(np.uint64)
-        for half, (seed, multiplier) in zip(halves, _HASH_SEEDS):
-            half ^= _mix64((groups * np.uint64(multiplier)) ^ np.uint64(seed))
-        return pa.array(first_documents(*halves), pa.int32())
+        groups = group_ids([self.first_documents, *columns])
+        first = np.empty(groups.max() + 1, dtype=np.int64)
+        # assigned in reverse, so each group keeps its lowest row
+        first[groups[::-1]] = np.arange(len(groups))[::-1]
+        return pa.array(first[groups], pa.int32())
 
     @property
     def num_copies(self) -> int:
