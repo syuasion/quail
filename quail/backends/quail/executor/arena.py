@@ -353,11 +353,22 @@ class KVArena:
         dropped them.
         """
         if (parent not in self.accounting.owned
-                or shared > self.accounting.tokens[parent]):
+                or shared > self.accounting.readable_tokens(parent)):
             return False
         if self.sliding is None:
             return True
         return self._sliding_start[parent] <= self.origin(shared)
+
+    def mark_readable(self, key, tokens: int) -> None:
+        """Let borrowers read a resident key's first tokens past its prefix.
+
+        The caller promises the key's admitted chunk writes those rows,
+        in its pages, before any borrower's rows read them, and that
+        nothing rewrites them while the key is resident.
+        """
+        if self.sliding is not None:
+            raise ValueError("a sliding window drops the rows it would share")
+        self.accounting.readable[key] = tokens
 
     def _borrow_plan(self, borrow):
         """The pages a borrow takes from each pool, and the sliding start.
@@ -426,6 +437,12 @@ class KVArena:
             raise ValueError(
                 f"{key!r}: rewinding to {tokens} tokens drops rows of "
                 f"the sliding window anchored at {self._base[key]}")
+        if self.accounting.borrowed_tokens(key) > tokens:
+            # a copy borrowed past its own document; a later operator
+            # borrows from the key it copied instead
+            before = self.free_pages
+            self.free_key(key)
+            return self.free_pages - before
         self.accounting.rewind(key, tokens)
         if self.sliding is not None:
             self.sliding.rewind(key, tokens - self._sliding_start[key])

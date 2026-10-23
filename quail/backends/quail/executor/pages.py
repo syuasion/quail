@@ -26,6 +26,9 @@ class PageArena:
         self.borrowed = {}    # key -> leading page ids read from a parent
         self.holds = [0] * num_pages    # page id -> keys holding it
         self.tokens = {}      # key -> resident token count, borrowed included
+        # key -> tokens past its prefix that its admitted chunk writes and
+        # nothing rewrites, so an exact copy may borrow them too
+        self.readable = {}
         self.pinned = set()    # current operators depend on these keys
         self._retained_sizes = {}
         self._retained_pages = 0
@@ -54,8 +57,8 @@ class PageArena:
         if capacity_tokens < tokens:
             raise ValueError("capacity_tokens must cover logical tokens")
         borrowed = list(borrowed)
-        if len(borrowed) * self.page_tokens > tokens:
-            raise ValueError("a key cannot borrow past its own tokens")
+        if len(borrowed) * self.page_tokens > capacity_tokens:
+            raise ValueError("a key cannot borrow past its own capacity")
         need = self.pages_needed(capacity_tokens) - len(borrowed)
         if need > len(self.free):
             return None
@@ -77,10 +80,14 @@ class PageArena:
             raise ValueError("a borrowed prefix is a whole number of pages")
         if parent not in self.owned:
             raise KeyError(f"borrow parent {parent!r} is not resident")
-        if shared > self.tokens[parent]:
+        if shared > self.readable_tokens(parent):
             raise ValueError(f"{parent!r} holds fewer tokens than borrowed")
         first = start // self.page_tokens
         return self.table_pages(parent)[first:shared // self.page_tokens]
+
+    def readable_tokens(self, key) -> int:
+        """The leading tokens of a key another key may borrow."""
+        return max(self.tokens[key], self.readable.get(key, 0))
 
     def drop_leading(self, key, pages: int) -> int:
         """Drop a key's first pages, borrowed ones first; returns pages freed."""
@@ -173,6 +180,7 @@ class PageArena:
         pages = self.owned.pop(key)
         borrowed = self.borrowed.pop(key)
         self.tokens.pop(key)
+        self.readable.pop(key, None)
         self.pinned.discard(key)
         self._forget_retained(key)
         return self.release_pages(borrowed + pages)
@@ -262,6 +270,7 @@ class PageArena:
         released = self.owned[key][keep:]
         self.owned[key] = self.owned[key][:keep]
         self.tokens[key] = tokens
+        self.readable.pop(key, None)
         freed = self.release_pages(released)
         if key in self.retained:
             self.retain(key)

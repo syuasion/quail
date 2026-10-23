@@ -688,12 +688,16 @@ class PrefixTree:
         parent: Per document, the position it borrows from, or None.
         shared: Per document, the borrowed tokens, a multiple of the
             page size.
+        copy_of: Per document, the first document in sorted order with
+            the same tokens, or None for a document with no earlier
+            copy.
     """
 
-    def __init__(self, order, parent, shared):
+    def __init__(self, order, parent, shared, copy_of=None):
         self.order = order
         self.parent = parent
         self.shared = shared
+        self.copy_of = [None] * len(parent) if copy_of is None else copy_of
         self._reader_groups = None
 
     @property
@@ -734,9 +738,14 @@ class PrefixIndex:
             common = _array_common_prefix
         self.order = sorted(range(n), key=keys.__getitem__)
         self.shared = np.zeros(n, dtype=np.int64)
+        self.copy_of = [None] * n
         # Every document computes its final token, including exact duplicates.
         for previous, index in zip(self.order, self.order[1:]):
-            self.shared[index] = min(common(arrays[previous], arrays[index]),
+            common_tokens = common(arrays[previous], arrays[index])
+            if common_tokens == len(arrays[previous]) == len(arrays[index]) > 0:
+                first = self.copy_of[previous]
+                self.copy_of[index] = previous if first is None else first
+            self.shared[index] = min(common_tokens,
                                      max(len(arrays[index]) - 1, 0))
         self._trees = {}
 
@@ -752,7 +761,8 @@ class PrefixIndex:
                     while parent[owner] is not None and shared[owner] >= pages:
                         owner = parent[owner]
                     parent[index] = owner
-            self._trees[page_tokens] = PrefixTree(self.order, parent, shared)
+            self._trees[page_tokens] = PrefixTree(self.order, parent, shared,
+                                                  self.copy_of)
         return self._trees[page_tokens]
 
 

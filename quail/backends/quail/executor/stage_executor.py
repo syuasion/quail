@@ -19,6 +19,7 @@ from quail.backends.quail.executor.stages import (
     frame_writes,
     state_share_points,
 )
+from quail.catalog.tokens import PrefixTree
 from quail.progress import Progress, logger
 
 
@@ -170,6 +171,10 @@ class StageExecutor:
             self.capacity_extra = max(self.capacity_extra, len(frame) + kept)
         # append-stage tokens each document holds after its frame
         self.appended = [0] * len(self.prefixes)
+        # documents whose exact copies borrow their question's KV
+        self.copied = set()
+        self.question_tokens = 0
+        prefix_tree = self._copies_borrow_questions(prefix_tree, stop_groups)
 
         resident = {}
         if self.paged:
@@ -272,6 +277,50 @@ class StageExecutor:
         self.finished = 0
 
         self.readouts = ReadoutGroups(self.torch, self.stages)
+
+    def _copies_borrow_questions(self, tree, stop_groups):
+        """Let each exact copy borrow its first copy's question KV too.
+
+        A copy's answer needs one fresh row, so it borrows the whole
+        pages of its first copy's document and question and computes
+        the rest. Only a run of one single-question stage qualifies:
+        any later write past the document would land in borrowed
+        pages. Hybrid, windowed, and canvas models keep their
+        borrows short of the document's last token.
+
+        Returns:
+            The prefix tree with each copy's parent and shared tokens.
+        """
+        stage = self.stages[0]
+        if (tree is None or not self.paged or len(self.stages) != 1
+                or stop_groups is not None or stage.frame or not stage.single
+                or stage.own_suffixes or stage.requests is not None
+                or stage.append or stage.paths is not None
+                or stage.canvas is not None or self.canvas
+                or stage.read_all_rows or stage.read_rows is not None
+                or stage.read_mask is not None or len(self.suffixes[0]) != 1
+                or getattr(getattr(self.pipeline, "spec", None), "state_layers", ())
+                or getattr(self.arena, "num_state_slots", 0)
+                or getattr(self.arena, "has_sliding", False)):
+            return tree
+        question = int(self.suffixes[0].lengths[0])
+        page = self.arena.page_tokens
+        parent, shared = list(tree.parent), list(tree.shared)
+        for a, first in enumerate(tree.copy_of):
+            if first is None:
+                continue
+            # the last question row is the answer, so a copy computes it
+            borrowed = (self.prefix_lengths[a] + question - 1) // page * page
+            if borrowed <= shared[a]:
+                continue
+            parent[a], shared[a] = first, borrowed
+            self.copied.add(first)
+        if not self.copied:
+            return tree
+        self.question_tokens = question
+        # the first copy keeps its question's KV for the copies to read
+        self.capacity_extra = max(self.capacity_extra, question)
+        return PrefixTree(tree.order, parent, shared, tree.copy_of)
 
     def _stop_width(self, stop_groups, budget) -> int:
         """Anchors of one stop key group in flight at once.
@@ -379,6 +428,10 @@ class StageExecutor:
         if parent is not None:
             self.arena.read_state((self.keys[parent],))
             self._reserved_parents[anchor] = self.keys[parent]
+        if anchor in self.copied:
+            # its chunk writes the question into its pages before any
+            # copy's rows read them, in this chunk or a later one
+            self.arena.mark_readable(key, prefix + self.question_tokens)
         if (anchor not in self._held_parents and anchor < len(self.borrowers)
                 and self.borrowers[anchor]):
             self._held_parents.add(anchor)
@@ -400,6 +453,17 @@ class StageExecutor:
         for a, j, start, end, carried in chunk_groups:
             key = self.keys[a]
             f = self.prefix_lengths[a]
+            if not carried and self.borrowing.shared(a) >= f:
+                # a copy reads its first copy's document and question
+                # pages and computes the question's last rows
+                borrowed = self.borrowing.shared(a)
+                question = self.suffixes[j].take([0])
+                rest = question.ids[borrowed - f:]
+                specs.append(dict(key=key, prefix=None, f=borrowed,
+                                  suffixes=Suffixes(rest, [len(rest)]),
+                                  single=True))
+                entries.append((j, 1))
+                continue
             frame = self.frames[j]
             append = self.stages[j].append
             request = self.own.get((j, a))
@@ -445,6 +509,8 @@ class StageExecutor:
             kept = int(sufs.lengths.sum()) if append else 0
             if request is not None and request.write_suffix_tokens is not None:
                 kept = request.write_suffix_tokens
+            if a in self.copied and start == 0:
+                kept = self.question_tokens
             if append or (self.writes[j] and start == 0):
                 appended[a] = path + kept
             if self.writes[j] and start == 0 and self._merged(j, start, end):
@@ -656,10 +722,13 @@ class StageExecutor:
                 raise AssertionError("nothing buildable and nothing in flight")
             self._run_part(groups)
             # the packed children hold their parents' pages now
-            for a, _, start, _, carried in groups:
+            for a, j, start, _, carried in groups:
                 parent = (self.borrowing.tree_parent[a]
                           if a < len(self.borrowing.tree_parent) else None)
-                if carried and start == 0 and parent is not None:
+                # a copy that borrows its whole document packs no prefix
+                packed = carried or (
+                    j == 0 and self.borrowing.shared(a) >= self.prefix_lengths[a])
+                if packed and start == 0 and parent is not None:
                     self.arena.release(self.keys[parent])
                 if a in self._reserved_parents:
                     self.arena.done_reading((self._reserved_parents.pop(a),))

@@ -121,6 +121,10 @@ def test_prefix_tree_borrows_whole_pages_and_siblings_share_one_parent():
     tree = prefix_tree([[], [], [5] * 16 + [6]], 16)
     assert tree.parent == [None, None, None]
     assert tree.shared == [0, 0, 0]
+    # exact copies name the first copy in sorted order; a document that
+    # only starts like another is no copy, and neither is an empty one
+    tree = prefix_tree([[5, 6], [5], [5, 6], [], [5, 6], []], 16)
+    assert tree.copy_of == [None, None, 0, None, 0, None]
 
     header = list(range(64))
     documents = [header + [1] * 8, header + [2] * 8, header + [3] * 8,

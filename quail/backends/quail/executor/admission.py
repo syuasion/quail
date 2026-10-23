@@ -617,8 +617,9 @@ class JoinAdmission:
                 if not self._zero_cost:
                     break
                 continue
+            # a copy may borrow past its document, into the question
             carried = (self._carried[a] if borrow is None
-                       else self.prefix[a] - borrow[1])
+                       else max(0, self.prefix[a] - borrow[1]))
             if carried + self._first[a] > room:
                 held.append(a)      # chunk room only; retry next chunk
                 continue

@@ -146,3 +146,52 @@ def test_large_filters_joins_and_filters_feeding_joins(arena_kind):
         documents, setup = large(rng, arena_kind)
         named(f"feed seed {seed}", check_feed, documents, [90, 91, 92],
               *join_parts(), setup)
+
+
+@pytest.mark.parametrize("length", [12, 16, 31])
+@pytest.mark.parametrize("one_per_chunk", [False, True])
+def test_exact_copies_borrow_their_first_copys_question(
+        arena_kind, length, one_per_chunk):
+    """A copy reads its first copy's document and question pages.
+
+    It computes the question rows past the last whole page only. A
+    windowed or canvas model keeps the copy's borrow short of its
+    document's last token. One chunk per document puts each copy's
+    first copy in an earlier chunk.
+    """
+    from types import SimpleNamespace
+
+    from helpers.kv_checker import Run, answer, chain, passthrough
+    from quail.backends.quail.executor.operators.filter import FilterPart
+    from quail.backends.quail.executor.parts import gated_stages
+    from quail.backends.quail.executor.stages import run_stages
+
+    path, sliding, canvas = arena_kind
+    question = list(range(90, 110))
+    copied = list(range(1, length + 1))
+    documents = [copied, list(copied), [77] * 5, list(copied)]
+    tail = [99] if canvas else []
+    setup = Setup(path=path, window=32 if sliding else None,
+                  canvas=tuple(tail), pages=60, sliding_pages=60,
+                  budget=length + len(question) + 2 if one_per_chunk else 600)
+    answers = {}
+    for document in documents:
+        h = chain(document + question + tail)
+        answers[h] = answer(h)
+    run = Run(setup, answers)
+    part = FilterPart(SimpleNamespace(question_token_ids=question),
+                      list(range(len(documents))), passthrough(), len(tail))
+    got, _, tokens = run_stages(
+        run.torch, run.arena, run.pipeline, gated_stages([part]), documents,
+        setup.budget, anchor_keys=[("d", i) for i in range(len(documents))],
+        attention_mode=setup.path, prefix_tree=run.tree(documents))
+    (stage,) = got
+    for d, document in enumerate(documents):
+        assert int(stage[d][0]) == answers[chain(document + question + tail)]
+    assert not run.arena.accounting.owned
+    asked = length + len(question) + len(tail)
+    if sliding or canvas:
+        borrowed = (length - 1) // 16 * 16
+    else:
+        borrowed = (length + len(question) - 1) // 16 * 16
+    assert tokens == asked + 2 * (asked - borrowed) + 5 + len(question) + len(tail)
