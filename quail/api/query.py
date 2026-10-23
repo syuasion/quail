@@ -10,7 +10,12 @@ import pyarrow as pa
 
 from quail.api.execute import execute_query
 from quail.catalog import inputs
-from quail.catalog.pairs import columns_key, estimate_pair_fraction
+from quail.catalog.pairs import (
+    columns_key,
+    compared_pairs,
+    estimate_pair_fraction,
+    pair_table,
+)
 from quail.catalog.selection import selected_rows
 from quail.execution.metrics import NodeMetrics, scalar_node_metrics
 from quail.execution.projection import projection_for
@@ -21,6 +26,7 @@ from quail.execution.types import PhysicalRequest, document_input
 from quail.explain import explain
 from quail.logical import (
     LogicalPlan,
+    join_comparisons,
     join_conditions,
     oriented_join_conditions,
 )
@@ -247,10 +253,20 @@ class Query:
             oriented = oriented_join_conditions(join)
             if oriented is None:
                 continue
-            _, _, conditions = oriented
-            fractions[position] = estimate_pair_fraction(
-                keys([left for left, _ in conditions]),
-                keys([right for _, right in conditions]))
+            _, _, conditions, comparisons = oriented
+            left_keys = keys([left for left, _ in conditions])
+            right_keys = keys([right for _, right in conditions])
+            fractions[position] = estimate_pair_fraction(left_keys, right_keys)
+            if comparisons:
+                # the share of the sampled equal pairs the comparisons keep
+                matched = pair_table("left", left_keys, "right", right_keys)
+                kept = compared_pairs(
+                    matched, [item.comparison for item in comparisons],
+                    keys([item.left for item in comparisons]),
+                    keys([item.right for item in comparisons]))
+                if matched.num_rows:
+                    fractions[position] *= (max(kept.num_rows, 1)
+                                            / matched.num_rows)
         return fractions
 
     def _scan_fractions(self, scans) -> dict:
@@ -415,7 +431,7 @@ class Query:
         needed = {}
         operators = self.logical.operators()
         for join in operators.joins:
-            for condition in join_conditions(join):
+            for condition in (*join_conditions(join), *join_comparisons(join)):
                 for ref in column_references(condition.left) + column_references(
                         condition.right):
                     needed.setdefault(ref.alias, {})[ref.column] = None

@@ -298,8 +298,29 @@ def join_conditions(join: "SemanticJoin") -> tuple:
     return tuple(conditions)
 
 
+def join_comparisons(join: "SemanticJoin") -> tuple:
+    """The ColumnComparison conditions under one SemanticJoin, in written order."""
+    comparisons = []
+
+    def visit(node):
+        if isinstance(node, Apply):
+            visit(node.input)
+        elif isinstance(node, Join):
+            visit(node.left)
+            comparisons.extend(node.comparisons)
+
+    visit(join.input)
+    return tuple(comparisons)
+
+
 def oriented_join_conditions(join: "SemanticJoin") -> tuple | None:
-    """Return one alias order and every equality oriented to that order."""
+    """Return one alias order and every condition oriented to that order.
+
+    Returns:
+        None for a join without equalities; otherwise (left alias, right
+        alias, equalities as (left, right) values, comparisons as
+        ColumnComparison with the left alias on the left).
+    """
     conditions = join_conditions(join)
     if not conditions:
         return None
@@ -310,7 +331,11 @@ def oriented_join_conditions(join: "SemanticJoin") -> tuple | None:
         if left.alias != left_alias:
             left, right = right, left
         oriented.append((left, right))
-    return left_alias, right_alias, tuple(oriented)
+    comparisons = tuple(
+        comparison if comparison.left.alias == left_alias
+        else comparison.flipped()
+        for comparison in join_comparisons(join))
+    return left_alias, right_alias, tuple(oriented), comparisons
 
 
 def join_applies(join: "SemanticJoin") -> tuple:

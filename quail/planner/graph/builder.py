@@ -81,11 +81,15 @@ def hash_join_nodes(joins, pair_fractions, scan_ports) -> list:
         oriented = oriented_join_conditions(join)
         if oriented is None:
             continue
-        left, right, conditions = oriented
+        left, right, conditions, comparisons = oriented
         nodes.append(HashJoin(
             node_id=f"hash_join:{left}-{right}",
             inputs=input_ports((by_alias[left], by_alias[right])),
-            left=left, right=right, on=conditions, written_position=position,
+            left=left, right=right, on=conditions,
+            comparisons=tuple(
+                (comparison.left, comparison.comparison, comparison.right)
+                for comparison in comparisons),
+            written_position=position,
             pair_fraction=pair_fractions.get(position, 1.0)))
     return nodes
 

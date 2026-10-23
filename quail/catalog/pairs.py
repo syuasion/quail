@@ -1,10 +1,11 @@
-"""Pair tables for joins with ordinary equality conditions.
+"""Pair tables for joins with ordinary column conditions.
 
 A pair table has one int32 column per joined alias holding row indices
 into that alias's document store. It lists exactly the (left, right)
-rows whose key columns are equal, so the model is asked about those
-pairs and no others. The HashJoin node builds it at run time from the
-key columns the request carries as ``columns:<alias>`` relations.
+rows whose key columns are equal and that pass the join's other
+column comparisons, so the model is asked about those pairs and no
+others. The HashJoin node builds it at run time from the key columns
+the request carries as ``columns:<alias>`` relations.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from quail.catalog.selection import equality_keys
+from quail.logical.predicates import COMPARISON_KERNELS
 
 COLUMNS_PREFIX = "columns:"
 
@@ -51,6 +53,28 @@ def pair_table(left_alias: str, left_keys, right_alias: str,
     return joined.select(["left", "right"]).sort_by(
         [("left", "ascending"), ("right", "ascending")]).rename_columns(
             [left_alias, right_alias])
+
+
+def compared_pairs(pairs: pa.Table, comparisons, left_values,
+                   right_values) -> pa.Table:
+    """Keep the pairs whose values pass every comparison; a null fails.
+
+    Args:
+        pairs: A pair table; each column holds row positions into its
+            side's values.
+        comparisons: One comparison per value array, such as ``"<"``.
+        left_values: Per comparison, the left table's values by row.
+        right_values: Per comparison, the right table's values by row.
+    """
+    left_alias, right_alias = pairs.column_names
+    passed = pa.array([True] * pairs.num_rows, pa.bool_())
+    for comparison, left, right in zip(comparisons, left_values, right_values,
+                                       strict=True):
+        compared = COMPARISON_KERNELS[comparison](
+            pc.take(left, pairs.column(left_alias)),
+            pc.take(right, pairs.column(right_alias)))
+        passed = pc.and_(passed, pc.fill_null(compared, False))
+    return pairs.filter(passed)
 
 
 def _join_key_tables(left_keys, right_keys) -> tuple[pa.Table, pa.Table]:

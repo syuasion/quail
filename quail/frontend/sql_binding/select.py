@@ -11,8 +11,8 @@ from quail.frontend.sql_binding.expressions import (
 )
 from quail.frontend.sql_binding.predicates import (
     _FLIPPED,
-    _PLAIN_COMPARISONS,
     COLUMN_NODES,
+    PLAIN_COMPARISONS,
 )
 from quail.logical import (
     AggregateCall,
@@ -273,7 +273,7 @@ class SelectBinder:
         having = tree.args.get("having")
         tests = []
         for index, term in enumerate(_conjuncts(having.this) if having else []):
-            comparison = _PLAIN_COMPARISONS.get(type(term))
+            comparison = PLAIN_COMPARISONS.get(type(term))
             if comparison is None:
                 raise CompileError(
                     f"HAVING compares an aggregate with a number, got {term.sql()}"

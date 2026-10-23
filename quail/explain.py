@@ -128,7 +128,7 @@ def logical_tree(logical):
             details = [f"question={node.call.question!r}"]
         elif isinstance(node, logical_nodes.Join):
             title = "Join"
-            details = ([f"on {condition}" for condition in node.on]
+            details = ([f"on {condition}" for condition in node.expressions()]
                        or ["cross"])
         elif isinstance(node, logical_nodes.Apply):
             title = f"Apply {node.function} ({node.kind}, {node.ids})"
@@ -455,9 +455,11 @@ def physical_tree(graph, *, logical=None, verbose=False, metrics=None,
                 node.selectivity, node.expected_rows,
                 stages.get(("join", node.written_position)), "tuples")))
         elif isinstance(node, HashJoin):
-            title += ": " + " and ".join(
-                f"{column_name(left)} = {column_name(right)}"
-                for left, right in node.on)
+            title += ": " + " and ".join((
+                *(f"{column_name(left)} = {column_name(right)}"
+                  for left, right in node.on),
+                *(f"{column_name(left)} {comparison} {column_name(right)}"
+                  for left, comparison, right in node.comparisons)))
             details.append(
                 f"pairs kept: {node.pair_fraction:.4g} of the cross product")
         elif isinstance(node, Foreign):

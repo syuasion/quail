@@ -23,6 +23,7 @@ from quail.logical import (
     AggregateCall,
     Aggregation,
     Alias,
+    ColumnComparison,
     ColumnRef,
     CompileError,
     Equality,
@@ -38,6 +39,7 @@ from quail.logical import (
     WindowCall,
 )
 from quail.logical.expressions import (
+    JOIN_COMPARISONS,
     SPAN_SUFFIX,
     aliased_call,
     column_expression,
@@ -59,7 +61,8 @@ class Query:
         self._filters = {}
         self._label_filters = {}     # alias -> [(name, labels, selectivity)]
         self._joins = []
-        self._pending_join = None    # (new aliases, conditions, applies)
+        # (new aliases, (equalities, comparisons), applies)
+        self._pending_join = None
         #                              awaiting the AI predicate over
         #                              its pairs
         self._applies = {}           # alias -> [(name, kind, ids, refs)]
@@ -341,15 +344,19 @@ class Query:
         return self
 
     def join(self, other: "Query", on=None) -> "Query":
-        """Join one table on ordinary column equalities.
+        """Join one table on ordinary column conditions.
 
         The next ai_filter() must name this table and one already in
-        the query; the model then sees only the pairs the equalities
+        the query; the model then sees only the pairs the conditions
         allow. With on=None every pair is a candidate.
 
         Args:
             other: One docs() query, optionally filtered.
-            on: ``col("c.url") == col("e.url")`` or a list of them.
+            on: ``col("c.url") == col("e.url")`` or a list of conditions.
+                Beside at least one equality, a condition may compare
+                two columns with ``<``, ``<=``, ``>``, ``>=``, or
+                ``!=``; for example, ``col("r1.id") < col("r2.id")``
+                keeps each unordered pair of a self-join once.
         """
         if self._pending_join is not None:
             raise CompileError(
@@ -357,22 +364,36 @@ class Query:
                 "add that predicate before joining another table")
         new_aliases = self._absorb([other])
         conditions = [] if on is None else (
-            [on] if isinstance(on, EqualsSpec) else list(on))
+            [on] if isinstance(on, (EqualsSpec, PredicateSpec)) else list(on))
         resolved = []
         for condition in conditions:
-            if not isinstance(condition, EqualsSpec):
+            if isinstance(condition, EqualsSpec):
+                resolved.append(Equality(self._resolve_value(condition.left),
+                                         self._resolve_value(condition.right)))
+            elif (isinstance(condition, PredicateSpec)
+                    and isinstance(condition.value, ColSpec)
+                    and condition.comparison in JOIN_COMPARISONS):
+                resolved.append(ColumnComparison(
+                    self._resolve_value(condition.col), condition.comparison,
+                    self._resolve_value(condition.value)))
+            else:
                 raise CompileError(
-                    "join(on=...) takes col(...) == col(...) conditions")
-            equality = Equality(self._resolve_value(condition.left),
-                                self._resolve_value(condition.right))
-            sides = set(equality.aliases())
+                    "join(on=...) takes conditions that compare two "
+                    "columns, such as col(...) == col(...)")
+            sides = set(resolved[-1].aliases())
             if new_aliases[0] not in sides or len(sides) != 2:
                 raise CompileError(
-                    f"join condition {equality} must relate the joined "
+                    f"join condition {resolved[-1]} must relate the joined "
                     f"table {new_aliases[0]!r} to a table already in the "
                     f"query")
-            resolved.append(equality)
-        self._pending_join = (new_aliases, tuple(resolved), [])
+        equalities = tuple(item for item in resolved if isinstance(item, Equality))
+        comparisons = tuple(item for item in resolved
+                            if isinstance(item, ColumnComparison))
+        if comparisons and not equalities:
+            raise CompileError(
+                f"join comparison {comparisons[0]} needs an equality "
+                f"condition beside it")
+        self._pending_join = (new_aliases, (equalities, comparisons), [])
         return self
 
     def _ai_join_pairs(self, p: PromptSpec, selectivity):
@@ -390,10 +411,12 @@ class Query:
                     f"apply {name!r} reads tables {outside} that the join "
                     f"predicate over {aliases} does not join")
         self._pending_join = None
+        equalities, comparisons = conditions
         self._joins.append(JoinSpec(aliases=tuple(new_aliases),
                                     predicate=ModelCall(bound),
                                     selectivity=selectivity,
-                                    on=conditions, applies=tuple(applies)))
+                                    on=equalities, comparisons=comparisons,
+                                    applies=tuple(applies)))
         return self
 
     def apply(self, fn, columns=(), *, name=None, ids=None,

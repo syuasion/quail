@@ -8,6 +8,7 @@ from quail.logical import (
     Aggregate,
     Alias,
     Apply,
+    ColumnComparison,
     ColumnRef,
     Equality,
     Filter,
@@ -51,7 +52,7 @@ def _column_refs(expression) -> tuple[ColumnRef, ...]:
         return _refs_of(model_call(expression).prompt.args)
     if isinstance(expression, RegularPredicate):
         return _column_refs(expression.expression)
-    if isinstance(expression, Equality):
+    if isinstance(expression, (Equality, ColumnComparison)):
         return _refs_of((expression.left, expression.right))
     if isinstance(expression, SortKey):
         return _column_refs(expression.expression)
@@ -100,7 +101,7 @@ def push_down_projection(root: LogicalNode) -> LogicalNode:
         if isinstance(node, Apply):
             refs = _refs_of(node.columns)
         elif isinstance(node, Join):
-            refs = _refs_of(node.on)
+            refs = _refs_of(node.expressions())
         elif isinstance(node, SemanticExtract):
             refs = _refs_of(node.call.prompt.args)
         elif isinstance(node, Scan):

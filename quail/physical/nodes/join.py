@@ -178,7 +178,9 @@ class HashJoin(PhysicalNode):
 
     ``on`` lists (left key, right key) pairs, each a source column or an
     expression over one; a row pair is kept when every listed pair of
-    values is equal. The node reads the key columns as values and
+    values is equal. ``comparisons`` lists (left value, comparison,
+    right value) tests, such as ``r1.id < r2.id``, that a kept pair
+    must also pass. The node reads the key columns as values and
     writes the pairs the join at ``written_position``
     asks the model about. ``pair_fraction`` is the planner's estimate
     of the pairs kept over the cross product.
@@ -187,6 +189,7 @@ class HashJoin(PhysicalNode):
     left: str = ""
     right: str = ""
     on: tuple[tuple[Expression, Expression], ...] = ()
+    comparisons: tuple[tuple[Expression, str, Expression], ...] = ()
     written_position: int = -1
     pair_fraction: float = 1.0
 

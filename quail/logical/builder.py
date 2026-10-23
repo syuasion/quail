@@ -44,6 +44,7 @@ class JoinSpec:
     selectivity: Optional[float] = None
     anchor: Optional[str] = None
     on: tuple = ()  # tuple[Equality, ...] over the tables
+    comparisons: tuple = ()  # tuple[ColumnComparison, ...] over the tables
     applies: tuple = ()  # (function, kind, columns) returning pairs
 
     @property
@@ -204,15 +205,16 @@ class LogicalPlanBuilder:
         for alias in join.aliases:
             root = Join(root, self._nodes[alias])
         present = {field.alias for field in root.output_schema()}
-        for condition in join.on:
+        for condition in (*join.on, *join.comparisons):
             if not set(condition.aliases()) <= present:
                 raise CompileError(
                     f"join condition {condition} names a table this join "
                     f"does not bring in ({list(join.aliases)}); put it on "
                     f"the JOIN that introduces the table"
                 )
-        if join.on:
-            root = replace(root, on=tuple(join.on))
+        if join.on or join.comparisons:
+            root = replace(root, on=tuple(join.on),
+                           comparisons=tuple(join.comparisons))
         written_position = self._joins
         self._joins += 1
         for function, kind, columns in join.applies:

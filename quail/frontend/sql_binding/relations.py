@@ -15,6 +15,7 @@ from quail.frontend.sql_binding.expressions import (
 )
 from quail.frontend.sql_binding.predicates import (
     COLUMN_NODES,
+    PLAIN_COMPARISONS,
     ai_aliases,
     bind_plain_test,
     extract_test,
@@ -23,28 +24,38 @@ from quail.frontend.sql_binding.predicates import (
 )
 from quail.logical import (
     Alias,
+    ColumnComparison,
     CompileError,
     Equality,
     FilterPredicate,
     JoinSpec,
 )
+from quail.logical.expressions import JOIN_COMPARISONS
 
 
-def _parse_equality(b, term, joined_alias: str) -> Equality:
-    """Parse one ordinary ON condition: two columns compared with =."""
-    if not isinstance(term, exp.EQ) or not all(
+def _parse_column_condition(b, term, joined_alias: str):
+    """Parse one ordinary ON condition: two columns compared.
+
+    Returns:
+        An Equality for ``=``, otherwise a ColumnComparison.
+    """
+    comparison = PLAIN_COMPARISONS.get(type(term))
+    if (comparison not in ("=", *JOIN_COMPARISONS) or not all(
             isinstance(side, COLUMN_NODES)
-            for side in (term.this, term.expression)):
+            for side in (term.this, term.expression))):
         raise CompileError(
-            f"ON supports column = column and AI predicates, got {term.sql()}"
+            f"ON supports comparisons of two columns and AI predicates, "
+            f"got {term.sql()}"
         )
-    equality = Equality(b.resolve_value(term.this), b.resolve_value(term.expression))
-    if joined_alias not in equality.aliases() or len(set(equality.aliases())) != 2:
+    left, right = b.resolve_value(term.this), b.resolve_value(term.expression)
+    condition = (Equality(left, right) if comparison == "="
+                 else ColumnComparison(left, comparison, right))
+    if joined_alias not in condition.aliases() or len(set(condition.aliases())) != 2:
         raise CompileError(
             f"JOIN {joined_alias} ON {term.sql()} must relate "
             f"{joined_alias!r} to a table already in the query"
         )
-    return equality
+    return condition
 
 
 def _from_clause(select):
@@ -57,7 +68,8 @@ class JoinBinder:
 
     binder: ExpressionBinder
     aliases: list[str] = field(default_factory=list)
-    conditions: dict[str, list[Equality]] = field(default_factory=dict)
+    # Equality and ColumnComparison conditions by the alias they join
+    conditions: dict[str, list] = field(default_factory=dict)
     claimed: set[str] = field(default_factory=set)
 
     def bind_tables(self, tree: exp.Select) -> None:
@@ -83,8 +95,9 @@ class JoinBinder:
             if on is None:
                 continue  # a bare/cross-joined table: some join
                 #             predicate must cover it (checked below)
-            # ON: equalities choose the pairs; at most one AI predicate
-            equalities, predicates = [], []
+            # ON: column conditions choose the pairs; at most one AI
+            # predicate
+            column_conditions, predicates = [], []
             for term in _conjuncts(on):
                 if _is_call(term, "AI_FILTER"):
                     predicates.append(
@@ -107,14 +120,20 @@ class JoinBinder:
                             plain
                         )
                         continue
-                    equalities.append(_parse_equality(b, term, alias))
+                    column_conditions.append(
+                        _parse_column_condition(b, term, alias))
             if len(predicates) > 1:
                 raise CompileError(
                     f"JOIN {alias} has {len(predicates)} AI predicates in "
                     f"ON; ask one question per JOIN"
                 )
-            if equalities:
-                self.conditions[alias] = equalities
+            if column_conditions:
+                if not any(isinstance(item, Equality)
+                           for item in column_conditions):
+                    raise CompileError(
+                        f"JOIN {alias} ON compares columns without an equality "
+                        f"beside the comparison")
+                self.conditions[alias] = column_conditions
             on_preds.extend(predicates)
 
         for predicate in on_preds:
@@ -160,7 +179,9 @@ class JoinBinder:
                 semantics="full",
                 selectivity=options.get("selectivity"),
                 anchor=anchor,
-                on=on,
+                on=tuple(item for item in on if isinstance(item, Equality)),
+                comparisons=tuple(item for item in on
+                                  if isinstance(item, ColumnComparison)),
             )
         )
 

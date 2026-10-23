@@ -572,3 +572,46 @@ def test_the_process_keeps_one_engine_configuration_at_a_time():
     state.close()
     assert events == [("release", "vllm", "first"), ("release", "vllm", "second"),
                       ("release", "quail", "third")]
+
+
+def test_a_self_join_on_a_smaller_id_asks_each_unordered_pair_once():
+    asked = []
+
+    def same_problem(node, assignment):
+        asked.append((assignment["a"], assignment["b"]))
+        return True
+
+    with quail.Session(CONFIG, tokenizer=fake_tok) as session:
+        session.register("reviews", quail.DocumentProvider.from_table(pa.table({
+            "id": ["r0", "r1", "r2", "r3"],
+            "body": ["noisy room", "noisy hall", "cold room", "slow lift"],
+            "hotel": ["h1", "h1", "h1", "h2"],
+        }), id_col="id"))
+        query = (session.docs("reviews").alias("a")
+                 .join(session.docs("reviews").alias("b"), on=[
+                     quail.col("a.hotel") == quail.col("b.hotel"),
+                     quail.col("b.id") > quail.col("a.id")])
+                 .ai_filter(quail.prompt("Same problem? {0} {1}",
+                                         quail.col("a.body"),
+                                         quail.col("b.body")))
+                 .select("a.id", "b.id"))
+        hash_join = query.plan().graph.node("hash_join:a-b")
+        # the comparison is turned to read left table first
+        (comparison,) = hash_join.comparisons
+        assert comparison[1] == "<"
+        assert "a.id < b.id" in query.explain()
+        # 10 of 16 sampled pairs share a hotel, and 3 of those 10 keep
+        # a smaller id on the left
+        assert hash_join.pair_fraction == pytest.approx(3 / 16)
+        result = _run(query, make_executor({}, same_problem))
+        assert sorted(result.to_rows()) == [
+            ("r0", "r1"), ("r0", "r2"), ("r1", "r2")]
+        assert len(asked) == 3
+    sql = ("SELECT a.id, b.id FROM reviews a JOIN reviews b "
+           "ON a.hotel = b.hotel AND a.id < b.id AND "
+           "AI_FILTER(PROMPT('Same problem? {0} {1}', a.body, b.body))")
+    with quail.Session(CONFIG, tokenizer=fake_tok) as session:
+        session.register("reviews", quail.DocumentProvider.from_table(pa.table({
+            "id": ["r0", "r1"], "body": ["x", "y"], "hotel": ["h1", "h1"],
+        }), id_col="id"))
+        assert "a.id < b.id" in session.sql(sql).explain()

@@ -349,7 +349,7 @@ REJECTED = [
      "PROMPT('x {0} {1} {2}', a.review, b.thread, a.review))", "distinct table"),
     ("SELECT r.id FROM reviews r JOIN products p ON r.id < p.asin "
      "AND AI_FILTER(PROMPT('x {0} {1}', r.review, p.description))",
-     "column = column"),
+     "without an equality"),
     ("SELECT r.id FROM reviews r JOIN products p ON r.id = r.review "
      "AND AI_FILTER(PROMPT('x {0} {1}', r.review, p.description))",
      "table already in the query"),
