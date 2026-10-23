@@ -8,7 +8,7 @@ import numpy as np
 import pyarrow as pa
 from pyarrow import compute as pc
 
-from quail.catalog.pairs import columns_key
+from quail.catalog.pairs import columns_key, key_documents
 from quail.catalog.selection import equality_keys
 from quail.execution.aggregates import prepare_aggregate
 from quail.execution.ids import document_ids
@@ -233,20 +233,30 @@ class AggregateRuntime:
 
 
 def _aggregate_documents(node, value, context) -> NodeResult:
-    """Group one table's documents by value columns; keep the first aggregate's ids."""
-    ids = document_ids(value)
-    columns = context.sources.get(columns_key(node.alias))
-    if columns is None:
-        raise KeyError(f"grouping {node.alias!r} needs its value columns")
-    table = pa.table({node.alias: ids, **{
-        key: columns.column(key).take(ids) for key in node.keys}})
-    result = aggregate_table(table, node)
-    (name, _, _) = node.aggregates[0]
-    kept = pc.sort_indices(result.column(name))
+    """Replace documents, or pairs, by their key documents, each once."""
+    if node.partner:
+        pairs = as_table(value)
+        anchors, partners = (
+            key_documents(context.sources, alias, column).to_numpy()[
+                pairs.column(alias).to_numpy()].astype(np.uint64)
+            for alias, column in ((node.alias, node.keys[0]),
+                                  (node.partner, node.keys[-1])))
+        # one uint64 per pair: the anchor's key, then the partner's
+        kept = np.sort((anchors << np.uint64(32)) | partners)
+        kept = kept[np.concatenate(([True], kept[1:] != kept[:-1]))]
+        return NodeResult(
+            {f"pairs:{node.written_position}": pa.table({
+                node.alias: (kept >> np.uint64(32)).astype(np.int32),
+                node.partner: (kept & np.uint64(0xFFFFFFFF)).astype(np.int32)})},
+            NodeMetrics(input_rows=pairs.num_rows, output_rows=len(kept)))
+    ids = document_ids(value).to_numpy()
+    keys = key_documents(context.sources, node.alias, node.keys[0]).to_numpy()
+    kept = np.zeros(len(keys), dtype=bool)
+    kept[keys[ids]] = True
+    kept = np.flatnonzero(kept).astype(np.int32)
     return NodeResult(
-        {f"rows:{node.alias}": Rows({
-            node.alias: result.column(name).take(kept).cast(pa.int32())})},
-        NodeMetrics(input_rows=len(ids), output_rows=result.num_rows))
+        {f"rows:{node.alias}": Rows({node.alias: kept})},
+        NodeMetrics(input_rows=len(ids), output_rows=len(kept)))
 
 
 def _partition_starts(keys, num_rows: int) -> pa.Array:

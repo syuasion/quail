@@ -30,6 +30,14 @@ def columns_key(alias: str) -> str:
     return f"{COLUMNS_PREFIX}{alias}"
 
 
+def key_documents(sources, alias: str, column: str) -> pa.Array:
+    """One alias's int32 document-id value column, one entry per document."""
+    columns = sources.get(columns_key(alias))
+    if columns is None or column not in columns.column_names:
+        raise KeyError(f"{alias!r} needs its {column!r} column")
+    return columns.column(column).combine_chunks().cast(pa.int32())
+
+
 def pair_table(left_alias: str, left_keys, right_alias: str,
                right_keys) -> pa.Table:
     """Row index pairs whose key columns are all equal.

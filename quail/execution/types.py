@@ -7,17 +7,14 @@ from dataclasses import dataclass, field
 from itertools import chain
 from typing import Any
 
-import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
 from quail.catalog.pairs import COLUMNS_PREFIX
 from quail.catalog.tokens import decode_token_documents
-from quail.execution.result import answer_table, filter_answer_table
+from quail.execution.result import answer_table
 from quail.execution.rows import Rows, rows_of
 from quail.physical import (
-    AiFilter,
-    HashJoin,
     OutputPort,
     PhysicalGraph,
     PortRef,
@@ -115,18 +112,6 @@ class PhysicalResponse:
                 from error
 
 
-def _filter_answers_table(node: AiFilter, value: Mapping) -> pa.Table:
-    """One row per answer a document gave, repeating the document id."""
-    lengths = np.fromiter((len(row) for row in value.values()), dtype=np.int64,
-                          count=len(value))
-    documents = np.repeat(
-        np.fromiter(value.keys(), dtype=np.int64, count=len(value)), lengths)
-    answers = (np.concatenate([np.asarray(row, dtype=bool) for row in value.values()])
-               if len(value) else np.zeros(0, dtype=bool))
-    return filter_answer_table(
-        node.alias, documents, np.full(len(documents), node.written_position), answers)
-
-
 def _join_answers_table(value: Mapping[str, Any]) -> pa.Table:
     """Build the join answer table without visiting pairs in Python.
 
@@ -171,10 +156,6 @@ def _output_table(node, port: OutputPort, value: Any) -> pa.Table:
         return value
     if port.name.startswith("rows:"):
         return rows_of(value, port.name.split(":", 1)[1]).table()
-    if port.value_type is ValueType.FILTER_ANSWERS:
-        if not isinstance(node, (AiFilter, HashJoin)):
-            raise TypeError("filter answer output needs a AiFilter node")
-        return _filter_answers_table(node, value)
     if port.value_type is ValueType.JOIN_ANSWERS:
         return _join_answers_table(value)
     raise TypeError(

@@ -12,7 +12,7 @@ from quail.api.execute import execute_query
 from quail.catalog import inputs
 from quail.catalog.pairs import columns_key, estimate_pair_fraction
 from quail.catalog.selection import selected_rows
-from quail.catalog.tokens import TEXT_HASH_COLUMNS
+from quail.catalog.tokens import FIRST_DOCUMENT
 from quail.execution.metrics import NodeMetrics, scalar_node_metrics
 from quail.execution.projection import projection_for
 from quail.execution.reporting import collect_answers, execution_report
@@ -31,7 +31,7 @@ from quail.logical.expressions import (
     source_columns,
 )
 from quail.physical import Aggregate as PhysicalAggregate
-from quail.physical import Scan, encode_graph
+from quail.physical import HashJoin, Scan, encode_graph
 from quail.planner import plan_query, refine_plan
 from quail.planner.optimizer.context import PlanningContext
 from quail.planner.optimizer.tree_rewrites import logical_alternatives
@@ -431,18 +431,22 @@ class Query:
         for alias, key in filter_stop_keys(self.logical).items():
             for column in key:
                 needed.setdefault(alias, {})[column] = None
-        hashed = {node.alias for node in self.plan().nodes
-                  if isinstance(node, PhysicalAggregate) and node.alias}
-        for alias in hashed:
-            for column in TEXT_HASH_COLUMNS:
-                needed.setdefault(alias, {})[column] = None
+        # each document's key document comes from the tokens, not a column
+        keyed = set()
+        for node in self.plan().nodes:
+            if isinstance(node, PhysicalAggregate) and node.alias:
+                keyed.update((node.alias, node.partner))
+            elif isinstance(node, HashJoin) and node.ports:
+                keyed.update((node.left, node.right))
+        for alias in keyed - {""}:
+            needed.setdefault(alias, {})[FIRST_DOCUMENT] = None
         tables = {}
         for alias, columns in needed.items():
             store = self._token_inputs[alias]
             # the text hash comes from the tokens, not a stored column
             tables[columns_key(alias)] = pa.table({
-                name: (store.tokens.text_hashes.column(name)
-                       if name in TEXT_HASH_COLUMNS else store.column(name))
+                name: (store.tokens.first_documents if name == FIRST_DOCUMENT
+                       else store.column(name))
                 for name in columns})
         return tables
 

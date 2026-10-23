@@ -19,6 +19,7 @@ from quail.backends.quail import QuailModelExecution
 from quail.backends.quail.distributed import execute_distributed_graph
 from quail.backends.quail.executor.arena import KVArena
 from quail.builtins import built_in_registry
+from quail.execution.result import filter_answer_table
 from quail.physical import (
     AiFilter,
     PhysicalGraph,
@@ -48,7 +49,9 @@ def test_filter_execution_and_retention_inputs(monkeypatch):
 
             result = NodeResult({
                 "rows:d": [index for index in indices if index % 2 == 0],
-                "filter_answers:d": {index: [index % 2 == 0] for index in indices}},
+                "filter_answers:d": filter_answer_table(
+                    "d", indices, [0] * len(indices),
+                    [index % 2 == 0 for index in indices])},
                 NodeMetrics(fresh_tokens=len(indices)))
             outputs.append({
                 "results": {"filter:d": result}, "retained": (),
@@ -72,7 +75,8 @@ def test_filter_execution_and_retention_inputs(monkeypatch):
     result = execute_distributed_graph(
         payload, graph, 2, round_fn, DEVICES["h100-sxm"], registry.runtimes,
         registry)
-    assert result["filters"]["d"] == {0: [True], 1: [False], 2: [True], 3: [False]}
+    answers = result["filters"]["d"].sort_by("d")
+    assert answers.column(2).to_pylist() == [True, False, True, False]
     assert result["fresh_tokens"] == 4
     assert result["kv_manager"]["evicted_keys"] == 2 and result["peak_gib"] == 1.0
     assert result["memory_capacity"] == {"pages": 32, "slots": 4}
@@ -227,7 +231,7 @@ def test_foreign_runs_per_batch_or_once_as_a_barrier_and_are_checked(monkeypatch
     result, survivors, join_truth = _foreign_run(
         monkeypatch, two_alias_graph(True, foreign=("per_batch", "drop")),
         functions)
-    assert sorted(result["filters"]["r"]) == list(range(14))
+    assert sorted(result["filters"]["r"].column("r").to_pylist()) == list(range(14))
     stage = result["joins"][0]
     kept = [d for d in survivors if d % 2 == 0]
     assert sorted(stage["anchor_index"]) == kept

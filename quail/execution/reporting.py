@@ -65,7 +65,7 @@ def superseded_outputs(plan) -> set:
     """The model outputs a HashJoin joins back to every document, and so replaces."""
     return {port.source for node in plan.nodes
             if isinstance(node, HashJoin) and node.ports
-            for port in node.inputs[1:]}
+            for port in node.inputs if port.name.startswith("answers:")}
 
 
 def collect_answers(logical, plan, outputs, documents):

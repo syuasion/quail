@@ -183,13 +183,22 @@ class HashJoin(PhysicalNode):
     asks the model about. ``pair_fraction`` is the planner's estimate
     of the pairs kept over the cross product.
 
-    With ``ports`` it joins a model operator's answers back instead:
-    its first input is every document of ``left``, its other inputs are
-    the operator's outputs over some of them, one per port in
-    ``ports``, and each document takes the answers of the answered
-    document whose ``on`` columns equal its own. It writes ``ports``,
-    the operator's own ports, for every document; ``written_position``
-    is then the operator's, for its filter answers.
+    With ``ports`` it joins a model operator's answers back instead.
+    The operator read one key document per text; ``on`` names, for
+    each table its answers cover, the value column holding a
+    document's key document. Its inputs are named:
+
+    - ``every:<alias>``: every document the operator would have read
+      without the grouping, for each of those tables.
+    - ``pairs``: the pairs the operator would have read, when it read
+      pairs rather than every combination.
+    - ``answers:<port>``: the operator's output on that port.
+
+    Each document, or pair, takes the answers of its key documents.
+    It writes ``ports``, the operator's own ports. ``semantics``
+    names an AI join's semantics, and its anchors' rows are then
+    those its expanded answers keep; ``written_position`` is the
+    operator's.
     """
 
     left: str = ""
@@ -198,6 +207,7 @@ class HashJoin(PhysicalNode):
     written_position: int = -1
     pair_fraction: float = 1.0
     ports: tuple[OutputPort, ...] = ()
+    semantics: str = ""
 
     type_name: ClassVar[str] = "quail.hash_join"
     runtime_key: ClassVar[str] = type_name

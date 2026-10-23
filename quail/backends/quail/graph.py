@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+import pyarrow as pa
+
 from quail.backends.quail.executor.memory import memory_report
 from quail.backends.quail.executor.operators import execution_parts
 from quail.backends.quail.reranker import FilterRuntime
@@ -216,15 +218,12 @@ def model_answers(graph, result) -> tuple[dict, list]:
     filters, joins = {}, []
     for node in graph.topological_nodes():
         if isinstance(node, AiFilter):
-            rows = result.nodes[node.node_id].outputs[
-                f"filter_answers:{node.alias}"]
-            combined = filters.setdefault(node.alias, {})
-            for document, answers in rows.items():
-                combined.setdefault(document, []).extend(answers)
+            filters.setdefault(node.alias, []).append(
+                result.nodes[node.node_id].outputs[f"filter_answers:{node.alias}"])
         elif isinstance(node, AiJoin):
             joins.append(result.nodes[node.node_id].outputs[
                 f"join_answers:{node.written_position}"])
-    return filters, joins
+    return {alias: pa.concat_tables(tables) for alias, tables in filters.items()}, joins
 
 
 def executed_join_plan(graph) -> list[dict]:

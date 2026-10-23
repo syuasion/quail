@@ -207,7 +207,8 @@ def test_explain_analyze_shows_measured_rows_beside_estimates(
 def test_answer_tables_keep_an_alias_named_like_their_own_columns(
         sess, alias, tmp_path):
     """An alias named answer or predicate, or holding a comma, reports as any other."""
-    pq.write_table(pa.table({"asin": ["p0", "p1"], "description": ["pad " * 20] * 2}),
+    pq.write_table(pa.table({"asin": ["p0", "p1"],
+                             "description": ["pad " * 20, "pod " * 20]}),
                    tmp_path / "p.parquet")
     sess.register("products", quail.DocumentProvider.from_parquet(
         str(tmp_path / "p.parquet"), id_col="asin"))

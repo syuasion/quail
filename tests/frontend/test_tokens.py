@@ -225,3 +225,15 @@ def test_identical_documents_hash_alike_and_any_change_hashes_apart(monkeypatch)
     assert list(zip(*(half.tolist() for half in tokens.token_hashes(
         array.offsets.to_numpy(), array.values.to_numpy())))) == pairs
     assert np.asarray(first).dtype == np.uint64
+
+
+def test_a_document_points_at_the_first_document_with_its_hash():
+    import numpy as np
+
+    from quail.catalog.tokens import first_documents
+
+    high = np.array([5, 5, 7, 5, 7], dtype=np.uint64)
+    assert first_documents(high, high).tolist() == [0, 0, 2, 0, 2]
+    # rows 0 and 1 share a high half but not a low one: two texts
+    low = np.array([1, 2, 3, 1, 3], dtype=np.uint64)
+    assert first_documents(high, low).tolist() == [0, 1, 2, 0, 2]

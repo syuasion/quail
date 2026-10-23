@@ -11,6 +11,7 @@ from quail.backends.quail.executor.operators.filter import stop_groups
 from quail.backends.quail.worker import quail_runtime_payload
 from quail.execution.ids import id_positions
 from quail.execution.metrics import NodeMetrics, NodeResult
+from quail.execution.result import filter_answer_table
 from quail.execution.rows import Rows, extraction_rows
 from quail.execution.types import PhysicalResponse
 from quail.physical import AiExtract, AiFilter, decode_graph
@@ -81,7 +82,8 @@ class FixedWorkers:
                     self.filtered.extend(ids)
                     result = NodeResult({
                         "rows:c": Rows({"c": pa.array(ids, pa.int32())}),
-                        "filter_answers:c": {document: [True] for document in ids},
+                        "filter_answers:c": filter_answer_table(
+                            "c", ids, [0] * len(ids), [True] * len(ids)),
                     }, NodeMetrics(input_rows=len(ids), output_rows=len(ids)))
                 elif isinstance(node, AiExtract):
                     self.extracted.setdefault(node.spec.name, []).extend(ids)

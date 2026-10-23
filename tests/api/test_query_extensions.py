@@ -10,6 +10,7 @@ import quail
 from quail.api import Session
 from quail.api import execute as runtime
 from quail.execution.metrics import NodeMetrics, NodeResult, RunResult
+from quail.execution.result import filter_answer_table
 from quail.execution.types import PhysicalResponse, export_physical_outputs
 from quail.physical import AiFilter, Scan, decode_graph
 from quail.planner.optimizer.rules import PhysicalRule
@@ -62,7 +63,8 @@ def test_query_scans_provider_and_preserves_extension_objects(
         filter_node = next(node for node in graph.nodes if isinstance(node, AiFilter))
         run = RunResult(None, {filter_node.node_id: NodeResult({
             "rows:d": [0],
-            "filter_answers:d": {0: [True], 1: [False]},
+            "filter_answers:d": filter_answer_table(
+                "d", [0, 1], [filter_node.written_position] * 2, [True, False]),
         })}, NodeMetrics())
         return PhysicalResponse(
             export_physical_outputs(graph, run),
