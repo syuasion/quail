@@ -160,8 +160,16 @@ class Oracle:
 
     def _filter(self, node, inputs) -> NodeResult:
         document_ids = list(inputs["document_ids"])
-        answers = {local: [self._filter_answer(node, document)]
-                   for local, document in enumerate(document_ids)}
+        groups = inputs.get("stop_groups")
+        stopped = set()
+        answers = {}
+        for local, document in enumerate(document_ids):
+            # the scheduler skips a stop key group once one of it survived
+            if groups is not None and groups[local] in stopped:
+                continue
+            answers[local] = [self._filter_answer(node, document)]
+            if groups is not None and answers[local][0]:
+                stopped.add(groups[local])
         if inputs.get("document_done") is not None:
             # the real loop reports a chunk's finished documents by position
             inputs["document_done"]([

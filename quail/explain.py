@@ -4,6 +4,7 @@ from collections import Counter
 from collections.abc import Mapping
 
 from quail import logical as logical_nodes
+from quail.catalog.tokens import first_document_columns
 from quail.logical import (
     DEFAULT_SELECTIVITY,
     LogicalPlan,
@@ -314,6 +315,12 @@ def _estimated_rows(graph):
     return rows
 
 
+def _grouping(key: str) -> str:
+    """What a document grouping keeps one document per: the text and row columns."""
+    columns = first_document_columns(key) or ()
+    return " and ".join(("text", *columns))
+
+
 def physical_tree(graph, *, logical=None, verbose=False, metrics=None,
                   estimates=None, stages=None):
     """Return a physical tree with estimated and measured columns.
@@ -374,7 +381,8 @@ def physical_tree(graph, *, logical=None, verbose=False, metrics=None,
             title += (f": one {node.alias}-{node.partner} pair per pair of texts, "
                       "on the executor")
         elif isinstance(node, Aggregate) and node.alias:
-            title += f": one {node.alias} document per text, on the executor"
+            title += (f": one {node.alias} document per "
+                      f"{_grouping(node.keys[0])}, on the executor")
         elif isinstance(node, Aggregate):
             title += ": " + ", ".join(node.columns)
             if node.keys:

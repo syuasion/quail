@@ -11,6 +11,7 @@ from helpers.oracle import Oracle, finish
 from helpers.sessions import CONFIG, fake_tok
 
 import quail
+from quail.catalog.tokens import first_document_column
 from quail.physical import Aggregate, AiFilter, AiJoin, HashJoin
 from quail.physical.pipelines import build_pipelines
 from quail.planner.rules.physical import ShouldAskOncePerDocument
@@ -45,9 +46,9 @@ def _sorted(table):
     return sorted(tuple(row.values()) for row in table.to_pylist())
 
 
-def _run(build, oracle, rule=True, monkeypatch=None):
+def _run(build, oracle, rule=True, monkeypatch=None, session=_session):
     """The query's rows, its answer tables, its plan, and the oracle's calls."""
-    with _session() as session, monkeypatch.context() as patch:
+    with session() as session, monkeypatch.context() as patch:
         if not rule:
             patch.setattr(ShouldAskOncePerDocument, "rewrite",
                           lambda self, graph, context: None)
@@ -63,10 +64,10 @@ def _run(build, oracle, rule=True, monkeypatch=None):
         return sorted(result.to_rows()), answers, plan
 
 
-def _both(build, grouped_oracle, plain_oracle, monkeypatch):
+def _both(build, grouped_oracle, plain_oracle, monkeypatch, session=_session):
     """Run a query with the rule and without it; both give the same answers."""
-    grouped = _run(build, grouped_oracle, True, monkeypatch)
-    plain = _run(build, plain_oracle, False, monkeypatch)
+    grouped = _run(build, grouped_oracle, True, monkeypatch, session)
+    plain = _run(build, plain_oracle, False, monkeypatch, session)
     assert grouped[:2] == plain[:2]
     return grouped
 
@@ -154,6 +155,46 @@ def test_a_chain_of_filters_is_asked_once_per_text_and_stays_one_unit(
     # each filter asks a text once: three texts, then the one that is left
     assert len(grouped.documents) < len(plain.documents)
     assert sorted(set(grouped.documents)) == sorted(grouped.documents[:3])
+
+
+def test_a_filter_with_a_stop_key_keeps_a_text_apart_under_each_key(
+        monkeypatch):
+    # hotel h1 stops at "fine", so its "ok" is never asked; h2's "ok" is
+    # a copy of it that must still be asked, as its own key document
+    bodies = ["fine", "ok", "ok", "ok", "meh", "meh"]
+    hotels = ["h1", "h1", "h2", "h2", "h3", "h3"]
+    asked = {True: [], False: []}
+
+    def session():
+        session = quail.Session(CONFIG, tokenizer=fake_tok)
+        session.register("reviews", quail.DocumentProvider.from_table(pa.table({
+            "id": [f"r{index}" for index in range(len(bodies))],
+            "body": bodies, "hotel": hotels}), id_col="id"))
+        return session
+
+    def oracle(rule):
+        def filters(alias, document, written_position):
+            asked[rule].append(document)
+            return bodies[document] != "meh"
+        return Oracle(filters=filters)
+
+    def build(session):
+        return (session.docs("reviews").alias("r")
+                .ai_filter(quail.prompt("Is {0} short?", quail.col("r.body")))
+                .distinct().select("r.hotel"))
+
+    rows, answers, plan = _run(build, oracle(True), True, monkeypatch, session)
+    plain_rows, plain_answers, _ = _run(build, oracle(False), False, monkeypatch,
+                                        session)
+    assert rows == plain_rows == [("h1",), ("h2",)]
+    (aggregate,) = [node for node in plan.nodes if isinstance(node, Aggregate)]
+    assert aggregate.keys == (first_document_column(("hotel",)),)
+    assert asked == {True: [0, 2, 4], False: [0, 2, 4, 5]}
+    # a copy of an asked document gets its answer even where its stop key
+    # group had stopped, so the plain run's answers are a subset
+    (grouped_answers,), (plain,) = answers.values(), plain_answers.values()
+    assert set(plain) < set(grouped_answers)
+    assert (3, 0, True) in grouped_answers
 
 
 def test_a_join_over_key_pairs_asks_each_pair_of_texts_once(monkeypatch):
