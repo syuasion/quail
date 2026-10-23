@@ -10,6 +10,7 @@ from quail.planner.rules.logical import (
 from quail.planner.rules.physical import (
     ChooseAttentionAlgorithm,
     ChooseClassifyImplementation,
+    ShouldAskOncePerDocument,
     ShouldEliminateWindowSort,
     ShouldPushDownLimit,
     ShouldPushDownLimitThroughWindow,
@@ -30,5 +31,5 @@ def built_in_rules() -> tuple:
         ShouldPushDownFilters(), ShouldLiftMaps(), ShouldEliminateWindowSort(),
         ShouldPushDownLimitThroughWindow(), ShouldPushDownLimit(),
         ChooseClassifyImplementation(), ShouldRetainKv(), ShouldSharePrefixes(),
-        ChooseAttentionAlgorithm(),
+        ChooseAttentionAlgorithm(), ShouldAskOncePerDocument(),
     )

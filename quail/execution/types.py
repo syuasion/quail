@@ -17,6 +17,7 @@ from quail.execution.result import answer_table, filter_answer_table
 from quail.execution.rows import Rows, rows_of
 from quail.physical import (
     AiFilter,
+    HashJoin,
     OutputPort,
     PhysicalGraph,
     PortRef,
@@ -171,7 +172,7 @@ def _output_table(node, port: OutputPort, value: Any) -> pa.Table:
     if port.name.startswith("rows:"):
         return rows_of(value, port.name.split(":", 1)[1]).table()
     if port.value_type is ValueType.FILTER_ANSWERS:
-        if not isinstance(node, AiFilter):
+        if not isinstance(node, (AiFilter, HashJoin)):
             raise TypeError("filter answer output needs a AiFilter node")
         return _filter_answers_table(node, value)
     if port.value_type is ValueType.JOIN_ANSWERS:

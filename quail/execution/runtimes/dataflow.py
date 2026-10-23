@@ -276,12 +276,53 @@ class ModelNodeRuntime:
         return result
 
 
+def _join_answers(node, inputs, context) -> NodeResult:
+    """Give every document the answers of the answered document with its keys."""
+    every, *answers = (inputs[port.name] for port in node.inputs)
+    alias = node.left
+    columns = context.sources.get(columns_key(alias))
+    ids = document_ids(every)
+
+    def keys(documents):
+        return [relation_values(columns, key).take(documents)
+                for key, _ in node.on]
+
+    outputs = {}
+    for port, value in zip(node.ports, answers, strict=True):
+        if port.value_type is ValueType.FILTER_ANSWERS:
+            answered = pa.array(sorted(value), pa.int32())
+        else:
+            answered = document_ids(value.ids[alias])
+        pairs = pair_table("document", keys(ids), "answer", keys(answered))
+        documents = pc.take(ids, pairs.column("document"))
+        sources = pc.take(answered, pairs.column("answer"))
+        if port.value_type is ValueType.FILTER_ANSWERS:
+            outputs[port.name] = {
+                int(document): value[int(source)]
+                for document, source in zip(documents.to_numpy(),
+                                            sources.to_numpy())}
+            continue
+        order = pc.sort_indices(documents)
+        documents = pc.take(documents, order)
+        if not value.values.num_columns:
+            # a filter's rows carry ids only
+            outputs[port.name] = Rows({alias: documents})
+            continue
+        position = pc.index_in(pc.take(sources, order), value_set=value.ids[alias])
+        outputs[port.name] = Rows({alias: documents}, value.values.take(position))
+    rows = outputs[f"rows:{alias}"]
+    return NodeResult(outputs, NodeMetrics(input_rows=len(ids),
+                                           output_rows=len(rows)))
+
+
 class HashJoinRuntime:
     """Pair the rows of two tables whose key columns are equal."""
 
     def execute(self, node, inputs, context) -> NodeResult:
         if not isinstance(node, HashJoin):
             raise TypeError(type(node).__name__)
+        if node.ports:
+            return _join_answers(node, inputs, context)
         sides = {}
         for alias, keys, compared in (
                 (node.left, [left for left, _ in node.on],

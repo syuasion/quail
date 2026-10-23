@@ -224,10 +224,29 @@ class AggregateRuntime:
             raise TypeError(type(node).__name__)
         if len(inputs) != 1:
             raise ValueError("Aggregate needs one input")
+        if node.alias:
+            return _aggregate_documents(node, next(iter(inputs.values())), context)
         table = _rows_table(next(iter(inputs.values())))
         result = aggregate_table(table, node)
         return NodeResult({"rows": QueryResult.from_table(result)}, NodeMetrics(
             input_rows=table.num_rows, output_rows=result.num_rows))
+
+
+def _aggregate_documents(node, value, context) -> NodeResult:
+    """Group one table's documents by value columns; keep the first aggregate's ids."""
+    ids = document_ids(value)
+    columns = context.sources.get(columns_key(node.alias))
+    if columns is None:
+        raise KeyError(f"grouping {node.alias!r} needs its value columns")
+    table = pa.table({node.alias: ids, **{
+        key: columns.column(key).take(ids) for key in node.keys}})
+    result = aggregate_table(table, node)
+    (name, _, _) = node.aggregates[0]
+    kept = pc.sort_indices(result.column(name))
+    return NodeResult(
+        {f"rows:{node.alias}": Rows({
+            node.alias: result.column(name).take(kept).cast(pa.int32())})},
+        NodeMetrics(input_rows=len(ids), output_rows=result.num_rows))
 
 
 def _partition_starts(keys, num_rows: int) -> pa.Array:

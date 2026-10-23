@@ -431,6 +431,84 @@ class ColumnStore:
         self._resources.close()
 
 
+# The two 64-bit halves of a document's text hash, as value columns
+TEXT_HASH_COLUMNS = ("__text_hash_1", "__text_hash_2")
+# per half: the seed mixed into every token, and the position multiplier
+_HASH_SEEDS = ((0x243F6A8885A308D3, 0x9E3779B97F4A7C15),
+               (0x13198A2E03707344, 0xC2B2AE3D27D4EB4F))
+
+
+_SHIFTS = (np.uint64(30), np.uint64(27), np.uint64(31))
+_MULTIPLIERS = (np.uint64(0xBF58476D1CE4E5B9), np.uint64(0x94D049BB133111EB))
+# rows hashed at once: their temporaries stay in cache, which is several
+# times faster than one pass over every token
+HASH_BLOCK_ROWS = 1 << 16
+
+
+def _mix64(out: np.ndarray) -> np.ndarray:
+    """Apply splitmix64's finalizer to a uint64 array in place, wrapping on overflow."""
+    scratch = np.empty_like(out)
+    for shift, multiplier in zip(_SHIFTS, (*_MULTIPLIERS, None)):
+        np.right_shift(out, shift, out=scratch)
+        np.bitwise_xor(out, scratch, out=out)
+        if multiplier is not None:
+            np.multiply(out, multiplier, out=out)
+    return out
+
+
+def token_hashes(offsets: np.ndarray, values: np.ndarray) -> tuple:
+    """Hash each document's token ids into two 64-bit halves, without a row loop.
+
+    A token is mixed with its position before the per-document sum, so
+    reordered tokens hash apart; the length is mixed in last, so a
+    document and its zero-padded copy do too.
+
+    Args:
+        offsets: Document start positions in values, then the end, as
+            in an Arrow list array.
+        values: Every document's token ids, back to back.
+
+    Returns:
+        Two uint64 arrays, one value per document.
+    """
+    offsets = np.asarray(offsets, dtype=np.int64)
+    num_documents = len(offsets) - 1
+    halves = tuple(np.zeros(num_documents, dtype=np.uint64) for _ in _HASH_SEEDS)
+    for first in range(0, num_documents, HASH_BLOCK_ROWS):
+        last = min(num_documents, first + HASH_BLOCK_ROWS)
+        block = offsets[first:last + 1]
+        starts = block[:-1] - block[0]
+        counts = np.diff(block)
+        tokens = np.asarray(values[block[0]:block[-1]]).astype(np.uint64)
+        positions = np.arange(len(tokens), dtype=np.uint64)
+        positions -= np.repeat(starts, counts).astype(np.uint64)
+        filled = counts > 0
+        for half, (seed, multiplier) in zip(halves, _HASH_SEEDS):
+            mixed = positions * np.uint64(multiplier)
+            mixed ^= tokens
+            mixed ^= np.uint64(seed)
+            _mix64(mixed)
+            sums = np.zeros(last - first, dtype=np.uint64)
+            if len(tokens):
+                sums[filled] = np.add.reduceat(mixed, starts[filled])
+            sums ^= counts.astype(np.uint64) * np.uint64(multiplier)
+            half[first:last] = _mix64(sums)
+    return halves
+
+
+def _word_hashes(documents) -> tuple:
+    """Text hashes of documents whose tokens are not integer ids, one by one."""
+    import hashlib
+
+    halves = ([], [])
+    for document in documents:
+        digest = hashlib.blake2b(repr(tuple(document)).encode(),
+                                 digest_size=16).digest()
+        halves[0].append(int.from_bytes(digest[:8], "little"))
+        halves[1].append(int.from_bytes(digest[8:], "little"))
+    return tuple(np.asarray(half, dtype=np.uint64) for half in halves)
+
+
 class TokenStore(Sequence):
     """Provide random token access from one memory mapped Arrow file."""
 
@@ -461,6 +539,7 @@ class TokenStore(Sequence):
             self._lengths = TokenLengths(
                 pa.chunked_array(self._length_batches, type=pa.int64()), self)
             self._prefix_index = None
+            self._text_hashes = None
             self._resources = resources.pop_all()
 
     @classmethod
@@ -497,6 +576,36 @@ class TokenStore(Sequence):
         return self._prefix_index
 
     @property
+    def text_hashes(self) -> pa.Table:
+        """Return each document's text hash, computed once.
+
+        Documents with identical tokens have equal hashes. The table has
+        one row per document and the TEXT_HASH_COLUMNS columns.
+        """
+        if self._text_hashes is None:
+            halves = ([], [])
+            for documents in self._documents_by_batch:
+                for chunk, offsets in zip(documents._chunks, documents._offsets):
+                    if pa.types.is_integer(chunk.type.value_type):
+                        pair = token_hashes(offsets, chunk.values.to_numpy())
+                    else:
+                        pair = _word_hashes(chunk.to_pylist())
+                    for half, values in zip(halves, pair):
+                        half.append(values)
+            self._text_hashes = pa.table({
+                name: pa.array(np.concatenate(half) if half else
+                               np.zeros(0, dtype=np.uint64), pa.uint64())
+                for name, half in zip(TEXT_HASH_COLUMNS, halves)})
+        return self._text_hashes
+
+    @property
+    def num_copies(self) -> int:
+        """Documents whose tokens equal an earlier document's."""
+        hashes = self.text_hashes
+        return hashes.num_rows - hashes.group_by(
+            list(TEXT_HASH_COLUMNS)).aggregate([]).num_rows
+
+    @property
     def arrow_array(self) -> pa.ChunkedArray:
         """Return the stored token batches without copying their buffers."""
         return pa.chunked_array(
@@ -516,6 +625,7 @@ class TokenStore(Sequence):
     def close(self) -> None:
         """Close the memory mapped Arrow file."""
         self._prefix_index = None
+        self._text_hashes = None
         self._resources.close()
 
     def select(self, indices) -> "TokenSelection":

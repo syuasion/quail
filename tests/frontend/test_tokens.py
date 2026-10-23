@@ -202,3 +202,26 @@ def test_offsets_reject_changed_text_and_preserve_sliced_rows():
     assert documents[2].character_offsets.tolist() == [[0, 1], [0, 1]]
     empty = pa.array([], type=pa.large_list(pa.int32()))
     assert mapper(empty, pa.array([], type=pa.string())).to_pylist() == []
+
+
+def test_identical_documents_hash_alike_and_any_change_hashes_apart(monkeypatch):
+    import numpy as np
+
+    from quail.catalog import tokens
+
+    documents = [[1, 2, 3], [1, 2, 3], [3, 2, 1], [1, 2, 3, 0], [1, 2], [], []]
+    array = pa.array(documents, pa.large_list(pa.int32()))
+    first, second = tokens.token_hashes(array.offsets.to_numpy(),
+                                        array.values.to_numpy())
+    pairs = list(zip(first.tolist(), second.tolist()))
+    # equal tokens hash equal; order, an extra token, or length tell apart
+    assert pairs[0] == pairs[1] and pairs[5] == pairs[6]
+    assert len(set(pairs)) == 5
+    # a slice of a list array, and any block size, give the same hashes
+    window = array.slice(1, 3)
+    assert list(zip(*(half.tolist() for half in tokens.token_hashes(
+        window.offsets.to_numpy(), window.values.to_numpy())))) == pairs[1:4]
+    monkeypatch.setattr(tokens, "HASH_BLOCK_ROWS", 2)
+    assert list(zip(*(half.tolist() for half in tokens.token_hashes(
+        array.offsets.to_numpy(), array.values.to_numpy())))) == pairs
+    assert np.asarray(first).dtype == np.uint64
