@@ -21,12 +21,15 @@ class Join:
     """One binary relational join; ``on`` empty means a cross join.
 
     The pairs it produces are the tuples a SemanticJoin above it asks
-    the model about. Every Equality names one column on each side.
+    the model about. Every Equality and ColumnComparison names one
+    column on each side; ``comparisons`` keeps only the pairs ``on``
+    pairs that also pass them.
     """
 
     left: LogicalNode
     right: LogicalNode
     on: tuple = ()  # tuple[Equality, ...]
+    comparisons: tuple = ()  # tuple[ColumnComparison, ...]
 
     type_name: ClassVar[str] = "quail.join"
 
@@ -34,7 +37,7 @@ class Join:
         return (self.left, self.right)
 
     def expressions(self) -> tuple:
-        return self.on
+        return (*self.on, *self.comparisons)
 
     def output_schema(self) -> tuple[ColumnRef, ...]:
         fields = list(self.left.output_schema())
@@ -46,7 +49,11 @@ class Join:
     def validate(self) -> None:
         left = {field.alias for field in self.left.output_schema()}
         right = {field.alias for field in self.right.output_schema()}
-        for condition in self.on:
+        if self.comparisons and not self.on:
+            raise CompileError(
+                f"join comparison {self.comparisons[0]} needs an equality "
+                f"condition beside it")
+        for condition in self.expressions():
             sides = set(condition.aliases())
             if not (sides & left and sides & right) or len(sides) != 2:
                 raise CompileError(
@@ -61,10 +68,12 @@ class Join:
         return replace(self, left=children[0], right=children[1])
 
     def with_expressions(self, expressions: tuple):
-        return replace(self, on=tuple(expressions))
+        return replace(self, on=tuple(expressions[:len(self.on)]),
+                       comparisons=tuple(expressions[len(self.on):]))
 
     def explain_fields(self) -> dict:
-        return {"on": [str(condition) for condition in self.on] or "cross"}
+        return {"on": [str(condition) for condition in self.expressions()]
+                or "cross"}
 
 
 @dataclass(frozen=True)

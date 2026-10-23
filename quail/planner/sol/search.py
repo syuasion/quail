@@ -11,7 +11,12 @@ from typing import Callable, Mapping
 
 import pyarrow as pa
 
-from quail.catalog.pairs import RowGroups, pair_table, partner_map
+from quail.catalog.pairs import (
+    RowGroups,
+    compared_pairs,
+    pair_table,
+    partner_map,
+)
 from quail.cost.filters import filter_cost
 from quail.cost.joins import longest_join_input, partner_stream_work
 from quail.cost.sol import SpeedOfLight, speed_of_light
@@ -192,10 +197,14 @@ class Search:
             oriented = oriented_join_conditions(join)
             if oriented is None:
                 continue
-            left_alias, right_alias, conditions = oriented
+            left_alias, right_alias, conditions, comparisons = oriented
             left_keys = [_key_values(stores, left) for left, _ in conditions]
             right_keys = [_key_values(stores, right) for _, right in conditions]
-            pairs = pair_table(left_alias, left_keys, right_alias, right_keys)
+            pairs = compared_pairs(
+                pair_table(left_alias, left_keys, right_alias, right_keys),
+                [item.comparison for item in comparisons],
+                [_key_values(stores, item.left) for item in comparisons],
+                [_key_values(stores, item.right) for item in comparisons])
             self.allowed_pairs[position] = {
                 left_alias: partner_map(pairs, left_alias, right_alias),
                 right_alias: partner_map(pairs, right_alias, left_alias)}

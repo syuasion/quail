@@ -67,7 +67,7 @@ Nodes are frozen dataclasses. Rewrites use `with_children()`,
 | --- | --- |
 | `Scan(provider, alias, column)` | Read document text from a registered table. |
 | `SemanticFilter(input, predicates)` | Evaluate model predicates over one table and keep passing rows. |
-| `Join(left, right, on)` | Form pairs from two inputs. Optional column equalities restrict the pairs. Without `on`, it forms every pair. |
+| `Join(left, right, on)` | Form pairs from two inputs. Optional column equalities, and comparisons beside them, restrict the pairs. Without `on`, it forms every pair. |
 | `SemanticJoin(input, predicate, semantics, selectivity, anchor)` | Evaluate a model predicate over the pairs from a `Join`. The semantics are `full`, `exists`, or `anti`. |
 | `SemanticClassify(input, call, name)` | Evaluate an `AI.CLASSIFY` call and add the label column `name`. |
 | `SemanticExtract(input, call, name)` | Extract one answer field and its character positions from each document. |

@@ -6,7 +6,12 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from quail.catalog.pairs import columns_key, pair_ids_table, pair_table
+from quail.catalog.pairs import (
+    columns_key,
+    compared_pairs,
+    pair_ids_table,
+    pair_table,
+)
 from quail.execution.ids import document_ids, id_positions
 from quail.execution.metrics import NodeMetrics, NodeResult
 from quail.execution.result import (
@@ -278,17 +283,25 @@ class HashJoinRuntime:
         if not isinstance(node, HashJoin):
             raise TypeError(type(node).__name__)
         sides = {}
-        for alias, keys in ((node.left, [left for left, _ in node.on]),
-                            (node.right, [right for _, right in node.on])):
+        for alias, keys, compared in (
+                (node.left, [left for left, _ in node.on],
+                 [left for left, _, _ in node.comparisons]),
+                (node.right, [right for _, right in node.on],
+                 [right for _, _, right in node.comparisons])):
             port = next(port for port in node.inputs
                         if port.source.port == f"rows:{alias}")
             ids = document_ids(inputs[port.name])
             columns = context.sources.get(columns_key(alias))
             # a key column may carry the alias's name: the ids stay apart
             sides[alias] = (ids, [relation_values(columns, key).take(ids)
-                                  for key in keys])
+                                  for key in keys],
+                            [relation_values(columns, value).take(ids)
+                             for value in compared])
         positions = pair_table(node.left, sides[node.left][1],
                                node.right, sides[node.right][1])
+        positions = compared_pairs(
+            positions, [comparison for _, comparison, _ in node.comparisons],
+            sides[node.left][2], sides[node.right][2])
         # pair_table pairs row positions; map them back to the ids read
         pairs = pa.table({
             alias: pc.take(sides[alias][0], positions.column(alias))
@@ -296,5 +309,5 @@ class HashJoinRuntime:
         return NodeResult(
             {f"pairs:{node.written_position}": pairs},
             NodeMetrics(
-                input_rows=sum(len(ids) for ids, _ in sides.values()),
+                input_rows=sum(len(side[0]) for side in sides.values()),
                 output_rows=pairs.num_rows))

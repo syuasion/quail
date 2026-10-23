@@ -745,6 +745,43 @@ class Equality:
         return f"{column_name(self.left)} = {column_name(self.right)}"
 
 
+@dataclass(frozen=True)
+class ColumnComparison:
+    """One ordinary join condition that compares two tables' columns.
+
+    For example, ``r1.id < r2.id`` keeps each unordered pair of a
+    self-join once. Equal columns are an Equality instead.
+    """
+
+    left: Any  # a value expression over one table
+    comparison: str  # one of JOIN_COMPARISONS
+    right: Any
+
+    type_name: ClassVar[str] = "quail.column_comparison"
+
+    def __post_init__(self):
+        if self.comparison not in JOIN_COMPARISONS:
+            raise CompileError(
+                f"a join comparison is one of {list(JOIN_COMPARISONS)}, "
+                f"not {self.comparison!r}")
+
+    def aliases(self) -> tuple[str, str]:
+        return self.left.alias, self.right.alias
+
+    def flipped(self) -> "ColumnComparison":
+        """The same condition with its two sides swapped."""
+        return ColumnComparison(self.right, FLIPPED_COMPARISONS[self.comparison],
+                                self.left)
+
+    def __str__(self) -> str:
+        return (f"{column_name(self.left)} {self.comparison} "
+                f"{column_name(self.right)}")
+
+
+JOIN_COMPARISONS = ("<>", "<", "<=", ">", ">=")
+FLIPPED_COMPARISONS = {"<>": "<>", "<": ">", "<=": ">=", ">": "<", ">=": "<="}
+
+
 def _explain(expression) -> str:
     if isinstance(expression, RegularPredicate):
         return str(expression)

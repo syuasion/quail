@@ -152,6 +152,24 @@ query = (
 result = query.collect()
 ```
 
+Beside at least one equality, `on` can compare two columns with `<`,
+`<=`, `>`, `>=`, or `!=`. For example, imagine a `reviews` table with a
+`hotel` column. To ask about each unordered pair of reviews of the same
+hotel once, join the table to itself:
+
+```python
+query = (
+    session.docs("reviews").alias("a")
+    .join(
+        session.docs("reviews").alias("b"),
+        on=[col("a.hotel") == col("b.hotel"), col("a.id") < col("b.id")])
+    .ai_if(
+        prompt('Do both reviews report the same problem?\n\n{0}\n\n{1}',
+               col("a.body"), col("b.body")))
+    .select("a.id", "b.id")
+)
+```
+
 ## Column expressions
 
 Use `.field(name)` to read a field of a struct column. You can apply

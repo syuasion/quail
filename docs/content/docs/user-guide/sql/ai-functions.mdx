@@ -93,6 +93,11 @@ JOIN evidence e
 
 The model evaluates only pairs where `c.wiki_url = e.id`.
 
+Beside at least one equality, `ON` can compare two columns with `<`,
+`<=`, `>`, `>=`, or `<>`. For example, `ON a.hotel = b.hotel AND a.id <
+b.id` over `reviews a JOIN reviews b` asks about each unordered pair of
+one hotel's reviews once.
+
 ### EXISTS and NOT EXISTS
 
 `EXISTS` keeps a row if the subquery returns at least one match.
