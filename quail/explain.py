@@ -370,9 +370,11 @@ def physical_tree(graph, *, logical=None, verbose=False, metrics=None,
                 for name, members in node.structs)
         elif isinstance(node, Limit):
             title += f": {node.count:,}"
+        elif isinstance(node, Aggregate) and node.partner:
+            title += (f": one {node.alias}-{node.partner} pair per pair of texts, "
+                      "on the executor")
         elif isinstance(node, Aggregate) and node.alias:
-            title += (f": one {node.alias} document per text, on the executor "
-                      f"(group by {', '.join(node.keys)})")
+            title += f": one {node.alias} document per text, on the executor"
         elif isinstance(node, Aggregate):
             title += ": " + ", ".join(node.columns)
             if node.keys:
@@ -458,9 +460,12 @@ def physical_tree(graph, *, logical=None, verbose=False, metrics=None,
                 node.selectivity, node.expected_rows,
                 stages.get(("join", node.written_position)), "tuples")))
         elif isinstance(node, HashJoin) and node.ports:
-            answered = node.inputs[1].source.node_id
-            title += (f": answers of {answered} to every {node.left} document "
-                      f"with the same text")
+            (answered,) = {port.source.node_id for port in node.inputs
+                           if port.name.startswith("answers:")}
+            covered = (f"{node.left} document with the same text"
+                       if node.left == node.right
+                       else f"{node.left}-{node.right} pair with the same texts")
+            title += f": answers of {answered} to every {covered}"
         elif isinstance(node, HashJoin):
             title += ": " + " and ".join((
                 *(f"{column_name(left)} = {column_name(right)}"

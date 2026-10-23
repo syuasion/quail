@@ -97,11 +97,14 @@ class Aggregate(PhysicalNode):
     aggregate names in result order.
 
     Without ``alias`` it groups the result rows on the coordinator.
-    With ``alias`` it groups one table's documents on the executor,
-    reading the key columns from that table's value columns, before a
-    model operator reads them: its ``rows:<alias>`` output holds the
-    first aggregate's values, document ids such as one per distinct
-    text.
+    With ``alias`` it groups one table's documents on the executor
+    before a model operator reads them: ``keys`` is one value column
+    of that table holding a document id, and its ``rows:<alias>``
+    output holds the distinct ids, such as one document per text.
+    With ``partner`` too it groups the pairs of the join at
+    ``written_position`` instead: each pair becomes its anchor's and
+    its partner's key, and ``pairs:<written_position>`` holds the
+    distinct pairs.
     """
 
     keys: tuple[str, ...] = ()
@@ -109,6 +112,8 @@ class Aggregate(PhysicalNode):
     having: tuple[tuple[str, str, float], ...] = ()
     columns: tuple[str, ...] = ()
     alias: str = ""
+    partner: str = ""
+    written_position: int = -1
 
     type_name: ClassVar[str] = "quail.aggregate"
     runtime_key: ClassVar[str] = type_name
@@ -121,6 +126,9 @@ class Aggregate(PhysicalNode):
 
     @property
     def outputs(self) -> tuple[OutputPort, ...]:
+        if self.partner:
+            return (OutputPort(f"pairs:{self.written_position}", ValueType.PAIRS,
+                               schema=(self.alias, self.partner)),)
         if self.alias:
             return (OutputPort(f"rows:{self.alias}", ValueType.ROWS,
                                schema=(self.alias,)),)

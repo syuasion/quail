@@ -433,6 +433,27 @@ class ColumnStore:
 
 # The two 64-bit halves of a document's text hash, as value columns
 TEXT_HASH_COLUMNS = ("__text_hash_1", "__text_hash_2")
+# each document's first document with the same text hash
+FIRST_DOCUMENT = "__first_document"
+
+
+def first_documents(high, low) -> np.ndarray:
+    """Return each row's first row with the same (high, low) hash, as int32."""
+    # the codes number the high halves in order of first appearance
+    codes = pc.dictionary_encode(pa.array(high)).indices.to_numpy()
+    new = np.ones(len(codes), dtype=bool)
+    new[1:] = codes[1:] > np.maximum.accumulate(codes)[:-1]
+    first = np.flatnonzero(new).astype(np.int32)[codes]
+    if np.array_equal(low, low[first]):
+        return first
+    # two texts share a high half: group by both halves; lexsort is stable
+    order = np.lexsort((low, high))
+    starts = np.ones(len(order), dtype=bool)
+    starts[1:] = ((high[order[1:]] != high[order[:-1]])
+                  | (low[order[1:]] != low[order[:-1]]))
+    first = np.empty(len(order), dtype=np.int32)
+    first[order] = order[starts][np.cumsum(starts) - 1]
+    return first
 # per half: the seed mixed into every token, and the position multiplier
 _HASH_SEEDS = ((0x243F6A8885A308D3, 0x9E3779B97F4A7C15),
                (0x13198A2E03707344, 0xC2B2AE3D27D4EB4F))
@@ -540,6 +561,7 @@ class TokenStore(Sequence):
                 pa.chunked_array(self._length_batches, type=pa.int64()), self)
             self._prefix_index = None
             self._text_hashes = None
+            self._first_documents = None
             self._resources = resources.pop_all()
 
     @classmethod
@@ -599,11 +621,23 @@ class TokenStore(Sequence):
         return self._text_hashes
 
     @property
+    def first_documents(self) -> pa.Array:
+        """Return each document's first document with the same hash, computed once.
+
+        A document whose tokens no earlier document has is its own first.
+        """
+        if self._first_documents is None:
+            hashes = self.text_hashes
+            self._first_documents = pa.array(first_documents(
+                *(hashes.column(name).to_numpy() for name in TEXT_HASH_COLUMNS)),
+                pa.int32())
+        return self._first_documents
+
+    @property
     def num_copies(self) -> int:
         """Documents whose tokens equal an earlier document's."""
-        hashes = self.text_hashes
-        return hashes.num_rows - hashes.group_by(
-            list(TEXT_HASH_COLUMNS)).aggregate([]).num_rows
+        first = self.first_documents.to_numpy()
+        return int(np.count_nonzero(first != np.arange(len(first))))
 
     @property
     def arrow_array(self) -> pa.ChunkedArray:
@@ -626,6 +660,7 @@ class TokenStore(Sequence):
         """Close the memory mapped Arrow file."""
         self._prefix_index = None
         self._text_hashes = None
+        self._first_documents = None
         self._resources.close()
 
     def select(self, indices) -> "TokenSelection":

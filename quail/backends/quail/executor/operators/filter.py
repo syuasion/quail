@@ -19,6 +19,7 @@ from quail.catalog.tokens import (
 from quail.execution.ids import document_ids as arrow_ids
 from quail.execution.ids import id_positions
 from quail.execution.metrics import NodeMetrics, NodeResult
+from quail.execution.result import filter_answer_table
 from quail.execution.rows import Rows
 from quail.progress import answer_sink
 
@@ -165,22 +166,30 @@ def filter_result(node, answers, tokens, document_ids,
 
     Returns:
         A NodeResult containing surviving IDs, filter answers, and metrics.
+        The filter answers are a filter_answer_table, one row per answer.
     """
     local = np.fromiter(answers, dtype=np.int64, count=len(answers))
     passed = np.fromiter((len(row) == 1 and all(row) for row in answers.values()),
                          dtype=bool, count=len(answers))
     positions = np.asarray(document_ids, dtype=np.int64)
     survivors = arrow_ids(np.sort(positions[local[passed]]))
-    global_answers = dict(zip(positions[local].tolist(), answers.values()))
+    lengths = np.fromiter((len(row) for row in answers.values()),
+                          dtype=np.int64, count=len(answers))
+    answered = np.repeat(positions[local], lengths)
+    values = (np.concatenate([np.asarray(row, dtype=bool)
+                              for row in answers.values()])
+              if len(answers) else np.zeros(0, dtype=bool))
     return NodeResult(
         outputs={
             f"rows:{node.alias}": Rows({node.alias: survivors}),
-            f"filter_answers:{node.alias}": global_answers,
+            f"filter_answers:{node.alias}": filter_answer_table(
+                node.alias, answered,
+                np.full(len(answered), node.written_position), values),
         },
         metrics=NodeMetrics(
             input_rows=len(document_ids),
             output_rows=len(survivors),
-            evaluated_documents=len(global_answers),
+            evaluated_documents=len(answers),
             fresh_tokens=tokens,
             gpu_s=gpu_s,
             chunks=chunks,

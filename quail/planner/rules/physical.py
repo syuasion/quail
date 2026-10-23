@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from quail.catalog.tokens import TEXT_HASH_COLUMNS
+from quail.catalog.tokens import FIRST_DOCUMENT
 from quail.cost.budgets import choose_attention_path, tree_attention_allowed
 from quail.cost.retention import coefficients
 from quail.logical import ColumnRef
@@ -18,11 +18,14 @@ from quail.physical import (
     AiInference,
     AiJoin,
     AiScore,
+    Foreign,
     HashJoin,
+    InputPort,
     Limit,
     PhysicalGraph,
     PortRef,
     Sort,
+    ValueType,
     Window,
 )
 from quail.physical.base import input_ports
@@ -438,25 +441,24 @@ class ChooseAttentionAlgorithm(PhysicalRule):
         return PhysicalGraph(tuple(nodes), graph.root)
 
 
-# the share of an operator's documents that must be copies of others
-# before it is asked once per distinct document
+# the share of a table's documents that must be copies of others
+# before its model operators are asked once per text
 MIN_COPIES = 0.01
-# the Aggregate's output: the first document of each text
-_FIRST = "first_document"
 
 
 class ShouldAskOncePerDocument(PhysicalRule):
-    """Ask a model operator once per text: group by text hash, then join back.
+    """Ask model operators once per text: group by text hash, then join back.
 
-    An Aggregate before the operator groups the table's documents by
-    their text hash and keeps the first of each group; a HashJoin after
-    it gives every document the answers of the kept document with the
-    same hash. The rule wraps a filter, a one-document classification,
-    or a one-document score that runs alone: one in a pipeline hands
-    its documents' KV to the next operator, which skipped documents
-    would lack. It leaves an operator that keeps KV for a later one,
-    several GPUs, and diffusion models, whose answers depend on a
-    document's row as well as its tokens.
+    The rule takes each group of connected model operators: filters,
+    classifications and scores of one document, AI joins with one
+    partner, and classifications of a join's pairs. An Aggregate
+    replaces each document the group reads from outside by its key
+    document, the first with the same tokens, and each pair by its
+    pair of key documents. Edges inside the group stay, so a pipeline
+    stays a pipeline. A HashJoin after an operator gives each document,
+    or pair, that operator would have read the answers of its key
+    documents. The rule leaves several GPUs, and diffusion models,
+    whose answers depend on a document's row as well as its tokens.
     """
 
     name = "should_ask_once_per_document"
@@ -465,40 +467,98 @@ class ShouldAskOncePerDocument(PhysicalRule):
         model = None if context is None else context.model
         if model is None or context.gpus != 1 or model.canvas_tokens:
             return None
-        pipelines = build_pipelines(graph)
-        nodes = list(graph.nodes)
-        root = graph.root
+        nodes, root = list(graph.nodes), graph.root
         changed = False
-        for node in graph.nodes:
-            alias = _single_alias(node)
-            if (alias is None or len(pipelines.get(node.node_id, (node,))) != 1
-                    or getattr(node, "keep_kv", False)
-                    or any(isinstance(graph.node(port.source.node_id),
-                                      PhysicalAggregate)
-                           for port in node.inputs)
-                    or not _copied(context, alias)):
+        for unit in _units(graph):
+            if not _unit_qualifies(graph, unit, context):
                 continue
-            # an earlier wrap may have rewired this operator's inputs
-            current = next(item for item in nodes if item.node_id == node.node_id)
-            nodes, root = _wrapped(nodes, root, current, alias,
-                                   _provider(context, alias))
+            nodes, root = _wrapped(nodes, root, unit, context)
             changed = True
-        return PhysicalGraph(tuple(nodes), root) if changed else None
+        if not changed:
+            return None
+        return PhysicalGraph(PhysicalGraph(tuple(nodes), root).topological_nodes(),
+                             root)
 
 
-def _single_alias(node) -> str | None:
-    """The alias a model operator reads one document of, if it qualifies."""
+def _aliases(node) -> tuple[str, ...]:
+    """The tables a model operator's answers cover, or () if the rule leaves it."""
+    if isinstance(node, AiJoin):
+        return ((node.anchor, *node.partners) if len(node.partners) == 1
+                and node.semantics in ("full", "exists", "anti") else ())
     if isinstance(node, AiFilter):
-        alias = node.alias
-    elif isinstance(node, AiClassify) and node.spec.partner is None:
-        (alias,) = node.document_aliases
-    elif (isinstance(node, AiScore) and node.spec is not None
+        return (node.alias,)
+    if isinstance(node, AiClassify) and node.spec is not None:
+        aliases = (node.spec.anchor, *(alias for alias in node.spec.aliases
+                                       if alias != node.spec.anchor))
+        return aliases if len(aliases) == (1 if node.spec.partner is None else 2) \
+            else ()
+    if (isinstance(node, AiScore) and node.spec is not None
             and len(node.spec.aliases) == 1):
-        (alias,) = node.spec.aliases
-    else:
-        return None
-    ports = {port.name for port in node.outputs}
-    return alias if ports <= {f"rows:{alias}", f"filter_answers:{alias}"} else None
+        return tuple(node.spec.aliases)
+    return ()
+
+
+def _units(graph) -> list[list]:
+    """Model operators the rule can wrap, in groups joined by their edges."""
+    members = {node.node_id: node for node in graph.nodes if _aliases(node)}
+    group = {node_id: node_id for node_id in members}
+
+    def find(node_id):
+        while group[node_id] != node_id:
+            node_id = group[node_id]
+        return node_id
+
+    for node in members.values():
+        for port in node.inputs:
+            if port.source.node_id in members:
+                group[find(port.source.node_id)] = find(node.node_id)
+    units = {}
+    for node in graph.topological_nodes():
+        if node.node_id in members:
+            units.setdefault(find(node.node_id), []).append(node)
+    return list(units.values())
+
+
+def _unit_qualifies(graph, unit, context) -> bool:
+    """Whether the rule can wrap a group, and some table it reads has copies."""
+    inside = {node.node_id for node in unit}
+    sources = {}
+    for node in unit:
+        if isinstance(node, AiFilter | AiClassify | AiScore) and len(
+                _aliases(node)) == 1:
+            (alias,) = _aliases(node)
+            if {port.name for port in node.outputs} - {
+                    f"rows:{alias}", f"filter_answers:{alias}"}:
+                return False
+        for port in node.inputs:
+            producer = graph.node(port.source.node_id)
+            if isinstance(producer, PhysicalAggregate) and producer.alias:
+                return False    # wrapped already
+            if port.source.node_id in inside:
+                if port.value_type is ValueType.JOIN_ANSWERS:
+                    continue
+                if port.value_type is not ValueType.ROWS:
+                    return False
+                continue
+            if port.value_type is ValueType.ROWS:
+                alias = port.source.port.split(":", 1)[1]
+                if sources.setdefault(alias, port.source) != port.source:
+                    return False    # one alias from two places
+            elif not (port.value_type is ValueType.PAIRS
+                      and isinstance(node, AiJoin)
+                      and not isinstance(producer, Foreign)):
+                return False
+        if getattr(node, "keep_kv", False) and _read_outside(graph, node, inside):
+            return False
+    return any(_copied(context, alias) for alias in sources)
+
+
+def _read_outside(graph, node, inside) -> bool:
+    """Whether a node outside the group, or the root, reads the operator."""
+    return graph.root.node_id == node.node_id or any(
+        port.source.node_id == node.node_id
+        for item in graph.nodes if item.node_id not in inside
+        for port in item.inputs)
 
 
 def _copied(context, alias: str) -> bool:
@@ -517,39 +577,102 @@ def _provider(context, alias: str) -> str:
     return next((scan.provider for scan in scans if scan.alias == alias), alias)
 
 
-def _wrapped(nodes, root, node, alias, provider):
-    """Put a text hash Aggregate before one operator and a HashJoin after it."""
-    grouped = f"group_by_text:{node.node_id}"
-    joined = f"join_answers:{node.node_id}"
-    (rows_input,) = [port for port in node.inputs
-                     if port.source.port == f"rows:{alias}"]
-    before = PhysicalAggregate(
-        node_id=grouped, inputs=input_ports((rows_input.source,)),
-        keys=TEXT_HASH_COLUMNS, aggregates=((_FIRST, "min", alias),),
-        columns=(*TEXT_HASH_COLUMNS, _FIRST), alias=alias)
-    asked = replace(node, inputs=tuple(
-        replace(port, source=PortRef(grouped, f"rows:{alias}"))
-        if port is rows_input else port for port in node.inputs))
-    key = tuple((ColumnRef(alias, provider, column),) * 2
-                for column in TEXT_HASH_COLUMNS)
-    after = HashJoin(
-        node_id=joined,
-        inputs=input_ports((rows_input.source, *(
-            PortRef(node.node_id, port.name) for port in node.outputs))),
-        left=alias, right=alias, on=key,
-        written_position=(node.written_position if isinstance(node, AiFilter)
-                          else -1),
-        ports=node.outputs)
+def _wrapped(nodes, root, unit, context):
+    """Group a unit's outside inputs by text, and join its answers back."""
+    inside = {node.node_id for node in unit}
+    by_id = {node.node_id: node for node in unit}
+    grouped = {}    # an outside source -> its Aggregate
+    asked = {}
+    for node in unit:
+        ports = []
+        for port in node.inputs:
+            if port.source.node_id not in inside:
+                port = replace(port, source=_grouped(grouped, port, node))
+            ports.append(port)
+        asked[node.node_id] = replace(node, inputs=tuple(ports))
+    joins = {}
+
+    def joined(node_id) -> HashJoin:
+        if node_id not in joins:
+            joins[node_id] = _join_back(by_id[node_id], inside, joined, context)
+        return joins[node_id]
+
+    readers = [item for item in nodes if item.node_id not in inside]
+    for item in [*readers, None]:
+        refs = ([root] if item is None else
+                [port.source for port in item.inputs])
+        for ref in refs:
+            if ref.node_id in inside:
+                joined(ref.node_id)
 
     def moved(source):
-        return (PortRef(joined, source.port)
-                if source.node_id == node.node_id else source)
+        return (PortRef(joins[source.node_id].node_id, source.port)
+                if source.node_id in joins else source)
 
-    rewired = []
+    rewired = [*grouped.values()]
     for item in nodes:
-        if item.node_id == node.node_id:
-            rewired.extend((before, asked, after))
+        if item.node_id in inside:
+            rewired.append(asked[item.node_id])
             continue
         rewired.append(replace(item, inputs=tuple(
             replace(port, source=moved(port.source)) for port in item.inputs)))
-    return rewired, moved(root)
+    return [*rewired, *joins.values()], moved(root)
+
+
+def _grouped(grouped, port, node) -> PortRef:
+    """The Aggregate output that replaces one outside input of an operator."""
+    key = port.source
+    if key not in grouped:
+        name = f"group_by_text:{key.node_id}:{key.port}"
+        if port.value_type is ValueType.PAIRS:
+            grouped[key] = PhysicalAggregate(
+                node_id=name, inputs=input_ports((key,)),
+                keys=(FIRST_DOCUMENT, FIRST_DOCUMENT),
+                columns=(node.anchor, *node.partners), alias=node.anchor,
+                partner=node.partners[0], written_position=node.written_position)
+        else:
+            alias = key.port.split(":", 1)[1]
+            grouped[key] = PhysicalAggregate(
+                node_id=name, inputs=input_ports((key,)), keys=(FIRST_DOCUMENT,),
+                columns=(alias,), alias=alias)
+    (output,) = grouped[key].outputs
+    return PortRef(grouped[key].node_id, output.name)
+
+
+def _join_back(node, inside, joined, context) -> HashJoin:
+    """The HashJoin that gives an operator's answers to every document or pair."""
+    aliases = _aliases(node)
+    every = {}
+    pairs = None
+    if isinstance(node, AiClassify) and len(aliases) == 2:
+        (port,) = [port for port in node.inputs
+                   if port.value_type is ValueType.JOIN_ANSWERS]
+        join = joined(port.source.node_id)
+        # the join's documents, and its true pairs over them
+        every = {item.name.split(":", 1)[1]: item.source for item in join.inputs
+                 if item.name.startswith("every:")}
+        pairs = InputPort("pairs", ValueType.JOIN_ANSWERS,
+                          PortRef(join.node_id, port.source.port))
+    for port in node.inputs:
+        if port.value_type is ValueType.PAIRS:
+            pairs = InputPort("pairs", ValueType.PAIRS, port.source)
+        elif port.value_type is ValueType.ROWS:
+            alias = port.source.port.split(":", 1)[1]
+            # a document reached this operator as it reached the one before
+            every[alias] = (PortRef(joined(port.source.node_id).node_id,
+                                    port.source.port)
+                            if port.source.node_id in inside else port.source)
+    return HashJoin(
+        node_id=f"join_back:{node.node_id}",
+        inputs=(*(InputPort(f"every:{alias}", ValueType.ROWS, every[alias])
+                  for alias in aliases),
+                *(() if pairs is None else (pairs,)),
+                *(InputPort(f"answers:{port.name}", port.value_type,
+                            PortRef(node.node_id, port.name))
+                  for port in node.outputs)),
+        left=aliases[0], right=aliases[-1],
+        on=tuple((ColumnRef(alias, _provider(context, alias), FIRST_DOCUMENT),) * 2
+                 for alias in aliases),
+        written_position=getattr(node, "written_position", -1),
+        ports=node.outputs,
+        semantics=node.semantics if isinstance(node, AiJoin) else "")

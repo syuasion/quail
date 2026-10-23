@@ -9,6 +9,7 @@ import pyarrow.compute as pc
 from quail.catalog.pairs import (
     columns_key,
     compared_pairs,
+    key_documents,
     pair_ids_table,
     pair_table,
 )
@@ -277,42 +278,120 @@ class ModelNodeRuntime:
 
 
 def _join_answers(node, inputs, context) -> NodeResult:
-    """Give every document the answers of the answered document with its keys."""
-    every, *answers = (inputs[port.name] for port in node.inputs)
-    alias = node.left
-    columns = context.sources.get(columns_key(alias))
-    ids = document_ids(every)
+    """Give every document, or pair, the answers of its key documents."""
+    from quail.execution.types import _join_answers_table
 
-    def keys(documents):
-        return [relation_values(columns, key).take(documents)
-                for key, _ in node.on]
-
+    keys = {left.alias: key_documents(
+        context.sources, left.alias, left.column).to_numpy()
+        for left, _ in node.on}
+    every = {alias: document_ids(inputs[f"every:{alias}"]).to_numpy()
+             for alias in keys}
+    pairs = inputs.get("pairs")
+    if isinstance(pairs, pa.Table) and "answer" in pairs.column_names:
+        # a classification of joined rows read the join's true pairs
+        pairs = true_answer_rows(pairs)
     outputs = {}
-    for port, value in zip(node.ports, answers, strict=True):
-        if port.value_type is ValueType.FILTER_ANSWERS:
-            answered = pa.array(sorted(value), pa.int32())
+    # an AI join's anchor rows come from its expanded answers
+    ports = sorted(node.ports, key=lambda port: port.name.startswith("rows:"))
+    for port in ports:
+        value = inputs[f"answers:{port.name}"]
+        if port.value_type is ValueType.JOIN_ANSWERS:
+            table = (value if isinstance(value, pa.Table)
+                     else _join_answers_table(value))
+            outputs[port.name] = _expanded(
+                table, (node.left, node.right), every, keys, pairs)
+        elif port.value_type is ValueType.FILTER_ANSWERS:
+            outputs[port.name] = _expanded(value, (node.left,), every, keys, pairs)
+        elif node.semantics:
+            joined = next(table for table in outputs.values()
+                          if isinstance(table, pa.Table))
+            outputs[port.name] = Rows({node.left: _join_survivors(
+                joined, node.left, node.semantics, every[node.left],
+                len(keys[node.left]))})
         else:
-            answered = document_ids(value.ids[alias])
-        pairs = pair_table("document", keys(ids), "answer", keys(answered))
-        documents = pc.take(ids, pairs.column("document"))
-        sources = pc.take(answered, pairs.column("answer"))
-        if port.value_type is ValueType.FILTER_ANSWERS:
-            outputs[port.name] = {
-                int(document): value[int(source)]
-                for document, source in zip(documents.to_numpy(),
-                                            sources.to_numpy())}
-            continue
-        order = pc.sort_indices(documents)
-        documents = pc.take(documents, order)
-        if not value.values.num_columns:
-            # a filter's rows carry ids only
-            outputs[port.name] = Rows({alias: documents})
-            continue
-        position = pc.index_in(pc.take(sources, order), value_set=value.ids[alias])
-        outputs[port.name] = Rows({alias: documents}, value.values.take(position))
-    rows = outputs[f"rows:{alias}"]
-    return NodeResult(outputs, NodeMetrics(input_rows=len(ids),
-                                           output_rows=len(rows)))
+            rows = value if isinstance(value, Rows) else Rows(
+                {node.left: document_ids(value)})
+            table = _expanded(rows.table(), rows.aliases, every, keys, pairs)
+            outputs[port.name] = Rows(
+                {alias: table.column(alias) for alias in rows.aliases},
+                table.drop_columns(list(rows.aliases)))
+    return NodeResult(outputs, NodeMetrics(
+        input_rows=len(every[node.left]),
+        output_rows=len(next(value for value in outputs.values()
+                             if isinstance(value, Rows)))))
+
+
+def _expanded(table: pa.Table, aliases, every, keys, pairs) -> pa.Table:
+    """Give each answer row to every document whose key document it names.
+
+    Args:
+        table: Answer rows, one int32 id column per alias.
+        aliases: The id columns to expand.
+        every: alias -> the documents the answers stand for.
+        keys: alias -> each document's key document.
+        pairs: The pairs the answers stand for when they cover two
+            tables, or None for every combination of their documents.
+    """
+    answered = {alias: table.column(alias).to_numpy() for alias in aliases}
+    if pairs is not None and len(aliases) == 2:
+        kept = np.ones(pairs.num_rows, dtype=bool)
+        for alias in aliases:
+            member = np.zeros(len(keys[alias]), dtype=bool)
+            member[every[alias]] = True
+            kept &= member[pairs.column(alias).to_numpy()]
+        found = {alias: pairs.column(alias).to_numpy()[kept] for alias in aliases}
+        index, rows = _matches(
+            _pair_keys(*(keys[alias][found[alias]] for alias in aliases)),
+            _pair_keys(*answered.values()))
+        found = {alias: documents[index] for alias, documents in found.items()}
+    else:
+        rows = np.arange(table.num_rows)
+        found = {}
+        for alias in aliases:
+            index, at = _matches(keys[alias][every[alias]], answered[alias][rows])
+            rows = rows[at]
+            found = {name: documents[at] for name, documents in found.items()}
+            found[alias] = every[alias][index]
+    table = table.take(rows)
+    for alias, documents in found.items():
+        table = table.set_column(
+            table.schema.get_field_index(alias), table.schema.field(alias),
+            pa.array(documents, pa.int32()))
+    return table
+
+
+def _pair_keys(anchors, partners) -> np.ndarray:
+    """One uint64 per pair: the anchor's id, then the partner's."""
+    return ((anchors.astype(np.uint64) << np.uint64(32))
+            | partners.astype(np.uint64))
+
+
+def _matches(wanted, answered) -> tuple[np.ndarray, np.ndarray]:
+    """Return positions (i, j) with wanted[i] == answered[j], ordered by i."""
+    if answered.dtype.kind == "i" and len(answered) and answered.min() >= 0:
+        size = int(max(answered.max(), wanted.max(initial=-1))) + 1
+        if np.bincount(answered, minlength=size).max() == 1:
+            # one answer row per key: look each key up by position
+            row_of = np.full(size, -1, dtype=np.int64)
+            row_of[answered] = np.arange(len(answered))
+            rows = row_of[wanted]
+            index = np.flatnonzero(rows >= 0)
+            return index, rows[index]
+    joined = pa.table({"key": wanted, "i": np.arange(len(wanted))}).join(
+        pa.table({"key": answered, "j": np.arange(len(answered))}), keys="key")
+    index, rows = (joined.column(name).to_numpy() for name in ("i", "j"))
+    order = np.argsort(index, kind="stable")
+    return index[order], rows[order]
+
+
+def _join_survivors(joined: pa.Table, anchor, semantics, reached,
+                    num_documents: int) -> np.ndarray:
+    """The anchors an AI join keeps, from its answers over every pair."""
+    matched = np.zeros(num_documents, dtype=bool)
+    matched[true_answer_rows(joined).column(anchor).to_numpy()] = True
+    if semantics == "anti":
+        return np.sort(reached[~matched[reached]]).astype(np.int32)
+    return np.flatnonzero(matched).astype(np.int32)
 
 
 class HashJoinRuntime:

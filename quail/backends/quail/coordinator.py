@@ -76,13 +76,8 @@ def merge_results(nodes, outputs, alias, ids, wall) -> dict:
             joined = pa.concat_tables(values)
             return joined.take(order(joined[alias]))
         if port.value_type is ValueType.FILTER_ANSWERS:
-            # a model filter answers by document; a condition answers
-            # in a relation
-            if isinstance(values[0], pa.Table):
-                joined = pa.concat_tables(values)
-                return joined.take(order(joined[alias]))
-            return {document: answer for value in values
-                    for document, answer in value.items()}
+            joined = pa.concat_tables(values)
+            return joined.take(order(joined[alias]))
         if port.value_type is ValueType.JOIN_ANSWERS:
             return merge_join_answers(values)
         raise TypeError(f"cannot merge worker output {port.value_type.value!r}")

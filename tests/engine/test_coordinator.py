@@ -8,6 +8,7 @@ from quail.backends.quail.coordinator import (
     shard_input,
 )
 from quail.execution.metrics import NodeMetrics, NodeResult
+from quail.execution.result import filter_answer_table
 from quail.execution.rows import Rows
 from quail.physical import InputPort, PortRef, ValueType
 from quail.physical.base import input_ports
@@ -34,11 +35,12 @@ def test_merged_rows_follow_the_input_order_and_sum_the_metrics():
                     inputs=input_ports((PortRef("scan:r", "rows:r"),)))
     outputs = [{"results": {node.node_id: NodeResult(
         {"rows:r": Rows({"r": pa.array(kept, pa.int32())}),
-         "filter_answers:r": {document: [True] for document in kept}},
+         "filter_answers:r": filter_answer_table(
+             "r", kept, [0] * len(kept), [True] * len(kept))},
         NodeMetrics(fresh_tokens=len(kept)))}} for kept in ([4, 0], [3])]
     (merged,) = merge_results([node], outputs, "r", [3, 4, 1, 0], 2.0).values()
     assert merged.outputs["rows:r"].ids["r"].to_pylist() == [3, 4, 0]
-    assert merged.outputs["filter_answers:r"] == {4: [True], 0: [True], 3: [True]}
+    assert merged.outputs["filter_answers:r"].column("r").to_pylist() == [3, 4, 0]
     assert (merged.metrics.fresh_tokens, merged.metrics.wall_s) == (3, 2.0)
 
 
