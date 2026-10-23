@@ -14,8 +14,8 @@ from quail.frontend.sql_binding.expressions import (
     _label_test,
 )
 from quail.frontend.sql_binding.predicates import (
+    _PLAIN_COMPARISONS,
     COLUMN_NODES,
-    PLAIN_COMPARISONS,
     ai_aliases,
     bind_plain_test,
     extract_test,
@@ -39,7 +39,7 @@ def _parse_column_condition(b, term, joined_alias: str):
     Returns:
         An Equality for ``=``, otherwise a ColumnComparison.
     """
-    comparison = PLAIN_COMPARISONS.get(type(term))
+    comparison = _PLAIN_COMPARISONS.get(type(term))
     if (comparison not in ("=", *JOIN_COMPARISONS) or not all(
             isinstance(side, COLUMN_NODES)
             for side in (term.this, term.expression))):
