@@ -12,6 +12,7 @@ import numpy as np
 import pyarrow as pa
 from pyarrow import compute as pc
 
+from quail.catalog.selection import group_ids
 from quail.logical.expressions import evaluate_expression
 
 
@@ -433,8 +434,33 @@ class ColumnStore:
 
 # The two 64-bit halves of a document's text hash, as value columns
 TEXT_HASH_COLUMNS = ("__text_hash_1", "__text_hash_2")
-# each document's first document with the same text hash
+# each document's first document with the same text hash and, after
+# a colon, the same values in the named row columns
 FIRST_DOCUMENT = "__first_document"
+
+
+def first_document_column(columns=()) -> str:
+    """Name the value column holding each document's first document.
+
+    Args:
+        columns: Row columns a document's first document must also
+            equal it in, such as a filter's stop key.
+    """
+    if not columns:
+        return FIRST_DOCUMENT
+    return f"{FIRST_DOCUMENT}:{','.join(sorted(columns))}"
+
+
+def first_document_columns(name: str) -> tuple[str, ...] | None:
+    """The row columns a first document column name groups by, or None.
+
+    Returns None for a name that is not a first document column.
+    """
+    if name == FIRST_DOCUMENT:
+        return ()
+    if name.startswith(f"{FIRST_DOCUMENT}:"):
+        return tuple(name[len(FIRST_DOCUMENT) + 1:].split(","))
+    return None
 
 
 def first_documents(high, low) -> np.ndarray:
@@ -632,6 +658,23 @@ class TokenStore(Sequence):
                 *(hashes.column(name).to_numpy() for name in TEXT_HASH_COLUMNS)),
                 pa.int32())
         return self._first_documents
+
+    def first_documents_with(self, columns) -> pa.Array:
+        """Each document's first document with its hash and its row values.
+
+        Args:
+            columns: Arrow arrays, one value per document; two documents
+                share a first document only if they are equal in each.
+        """
+        if not columns:
+            return self.first_documents
+        hashes = self.text_hashes
+        halves = [hashes.column(name).to_numpy().copy()
+                  for name in TEXT_HASH_COLUMNS]
+        groups = group_ids(columns).astype(np.uint64)
+        for half, (seed, multiplier) in zip(halves, _HASH_SEEDS):
+            half ^= _mix64((groups * np.uint64(multiplier)) ^ np.uint64(seed))
+        return pa.array(first_documents(*halves), pa.int32())
 
     @property
     def num_copies(self) -> int:

@@ -12,7 +12,7 @@ from quail.api.execute import execute_query
 from quail.catalog import inputs
 from quail.catalog.pairs import columns_key, estimate_pair_fraction
 from quail.catalog.selection import selected_rows
-from quail.catalog.tokens import FIRST_DOCUMENT
+from quail.catalog.tokens import first_document_columns
 from quail.execution.metrics import NodeMetrics, scalar_node_metrics
 from quail.execution.projection import projection_for
 from quail.execution.reporting import collect_answers, execution_report
@@ -431,24 +431,30 @@ class Query:
         for alias, key in filter_stop_keys(self.logical).items():
             for column in key:
                 needed.setdefault(alias, {})[column] = None
-        # each document's key document comes from the tokens, not a column
-        keyed = set()
+        # each document's key document comes from the tokens and the row
+        # columns its name lists, not from a stored column
         for node in self.plan().nodes:
             if isinstance(node, PhysicalAggregate) and node.alias:
-                keyed.update((node.alias, node.partner))
+                for alias, key in zip((node.alias, node.partner), node.keys):
+                    needed.setdefault(alias, {})[key] = None
             elif isinstance(node, HashJoin) and node.ports:
-                keyed.update((node.left, node.right))
-        for alias in keyed - {""}:
-            needed.setdefault(alias, {})[FIRST_DOCUMENT] = None
+                for left, _ in node.on:
+                    needed.setdefault(left.alias, {})[left.column] = None
         tables = {}
         for alias, columns in needed.items():
             store = self._token_inputs[alias]
-            # the text hash comes from the tokens, not a stored column
             tables[columns_key(alias)] = pa.table({
-                name: (store.tokens.first_documents if name == FIRST_DOCUMENT
-                       else store.column(name))
-                for name in columns})
+                name: self._column_values(store, name) for name in columns})
         return tables
+
+    @staticmethod
+    def _column_values(store, name: str):
+        """One alias's values of a stored column, or of a key document column."""
+        grouped_by = first_document_columns(name)
+        if grouped_by is None:
+            return store.column(name)
+        return store.tokens.first_documents_with(
+            [store.column(column) for column in grouped_by])
 
     def finish(self, response, coordinator_wall: float = 0.0) -> QueryResult:
         """Finish the physical graph and attach execution details."""

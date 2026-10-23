@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from quail.catalog.tokens import FIRST_DOCUMENT
+from quail.catalog.tokens import first_document_column
 from quail.cost.budgets import choose_attention_path, tree_attention_allowed
 from quail.cost.retention import coefficients
 from quail.logical import ColumnRef
@@ -453,12 +453,16 @@ class ShouldAskOncePerDocument(PhysicalRule):
     classifications and scores of one document, AI joins with one
     partner, and classifications of a join's pairs. An Aggregate
     replaces each document the group reads from outside by its key
-    document, the first with the same tokens, and each pair by its
-    pair of key documents. Edges inside the group stay, so a pipeline
-    stays a pipeline. A HashJoin after an operator gives each document,
-    or pair, that operator would have read the answers of its key
-    documents. The rule leaves several GPUs, and diffusion models,
-    whose answers depend on a document's row as well as its tokens.
+    document, and each pair by its pair of key documents. A
+    document's key document is the first with the same tokens and
+    the same values in every row column the group reads beside the
+    tokens, such as a filter's stop key, so an operator's answer is
+    a function of what it read. Edges inside the group stay, so a
+    pipeline stays a pipeline. A HashJoin after an operator gives
+    each document, or pair, that operator would have read the
+    answers of its key documents. The rule leaves several GPUs, and
+    diffusion models, whose answers depend on a document's row as
+    well as its tokens.
     """
 
     name = "should_ask_once_per_document"
@@ -577,24 +581,43 @@ def _provider(context, alias: str) -> str:
     return next((scan.provider for scan in scans if scan.alias == alias), alias)
 
 
+def _key_columns(unit) -> dict:
+    """Per alias, the name of the value column holding its key documents.
+
+    A filter's stop key is read per document beside the tokens, so
+    documents of one text under different stop keys stay apart.
+    """
+    columns = {}
+    for node in unit:
+        for alias in _aliases(node):
+            columns.setdefault(alias, set())
+        if isinstance(node, AiFilter):
+            columns[node.alias].update(node.stop_key)
+    return {alias: first_document_column(tuple(names))
+            for alias, names in columns.items()}
+
+
 def _wrapped(nodes, root, unit, context):
     """Group a unit's outside inputs by text, and join its answers back."""
     inside = {node.node_id for node in unit}
     by_id = {node.node_id: node for node in unit}
+    key_columns = _key_columns(unit)
     grouped = {}    # an outside source -> its Aggregate
     asked = {}
     for node in unit:
         ports = []
         for port in node.inputs:
             if port.source.node_id not in inside:
-                port = replace(port, source=_grouped(grouped, port, node))
+                port = replace(port, source=_grouped(grouped, port, node,
+                                                     key_columns))
             ports.append(port)
         asked[node.node_id] = replace(node, inputs=tuple(ports))
     joins = {}
 
     def joined(node_id) -> HashJoin:
         if node_id not in joins:
-            joins[node_id] = _join_back(by_id[node_id], inside, joined, context)
+            joins[node_id] = _join_back(by_id[node_id], inside, joined, context,
+                                        key_columns)
         return joins[node_id]
 
     readers = [item for item in nodes if item.node_id not in inside]
@@ -619,27 +642,28 @@ def _wrapped(nodes, root, unit, context):
     return [*rewired, *joins.values()], moved(root)
 
 
-def _grouped(grouped, port, node) -> PortRef:
+def _grouped(grouped, port, node, key_columns) -> PortRef:
     """The Aggregate output that replaces one outside input of an operator."""
     key = port.source
     if key not in grouped:
         name = f"group_by_text:{key.node_id}:{key.port}"
         if port.value_type is ValueType.PAIRS:
+            partner = node.partners[0]
             grouped[key] = PhysicalAggregate(
                 node_id=name, inputs=input_ports((key,)),
-                keys=(FIRST_DOCUMENT, FIRST_DOCUMENT),
+                keys=(key_columns[node.anchor], key_columns[partner]),
                 columns=(node.anchor, *node.partners), alias=node.anchor,
-                partner=node.partners[0], written_position=node.written_position)
+                partner=partner, written_position=node.written_position)
         else:
             alias = key.port.split(":", 1)[1]
             grouped[key] = PhysicalAggregate(
-                node_id=name, inputs=input_ports((key,)), keys=(FIRST_DOCUMENT,),
-                columns=(alias,), alias=alias)
+                node_id=name, inputs=input_ports((key,)),
+                keys=(key_columns[alias],), columns=(alias,), alias=alias)
     (output,) = grouped[key].outputs
     return PortRef(grouped[key].node_id, output.name)
 
 
-def _join_back(node, inside, joined, context) -> HashJoin:
+def _join_back(node, inside, joined, context, key_columns) -> HashJoin:
     """The HashJoin that gives an operator's answers to every document or pair."""
     aliases = _aliases(node)
     every = {}
@@ -671,7 +695,8 @@ def _join_back(node, inside, joined, context) -> HashJoin:
                             PortRef(node.node_id, port.name))
                   for port in node.outputs)),
         left=aliases[0], right=aliases[-1],
-        on=tuple((ColumnRef(alias, _provider(context, alias), FIRST_DOCUMENT),) * 2
+        on=tuple((ColumnRef(alias, _provider(context, alias),
+                            key_columns[alias]),) * 2
                  for alias in aliases),
         written_position=getattr(node, "written_position", -1),
         ports=node.outputs,

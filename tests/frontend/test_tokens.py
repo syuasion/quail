@@ -237,3 +237,24 @@ def test_a_document_points_at_the_first_document_with_its_hash():
     # rows 0 and 1 share a high half but not a low one: two texts
     low = np.array([1, 2, 3, 1, 3], dtype=np.uint64)
     assert first_documents(high, low).tolist() == [0, 1, 2, 0, 2]
+
+
+def test_a_first_document_with_row_columns_matches_their_values_too(tmp_path):
+    from quail.catalog.tokens import first_document_column, first_document_columns
+
+    schema = pa.schema({"id": pa.string(), "body": pa.string()})
+    batches = [pa.record_batch(
+        [["a", "b", "c", "d"], ["ok", "ok", "ok", "no"]], schema=schema)]
+    store = TokenStore.write(str(tmp_path / "rows.arrow"), batches,
+                             document_column="body", tokenizer=str.split,
+                             token_type=pa.string())
+    assert store.first_documents.to_pylist() == [0, 0, 0, 3]
+    assert store.first_documents_with([]).to_pylist() == [0, 0, 0, 3]
+    hotel = pa.array(["h1", "h2", "h1", "h1"])
+    assert store.first_documents_with([hotel]).to_pylist() == [0, 1, 0, 3]
+    # a null, and a NaN, is one value like any other
+    stars = pa.array([None, 1.0, None, 1.0])
+    assert store.first_documents_with([hotel, stars]).to_pylist() == [0, 1, 0, 3]
+    assert first_document_columns(first_document_column(())) == ()
+    assert first_document_columns(first_document_column(("b", "a"))) == ("a", "b")
+    assert first_document_columns("hotel") is None
