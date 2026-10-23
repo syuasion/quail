@@ -1,6 +1,7 @@
 """Built in physical node definitions."""
 
 from .classify import AiClassify, ClassifySpec
+from .copies import Expand, Representatives
 from .extract import AiExtract, ExtractSpec
 from .filter import AiFilter, Filter
 from .inference import AiInference, AiScore, InferenceSpec, ScoreSpec
@@ -19,6 +20,7 @@ __all__ = [
     "Barrier",
     "ClassifySpec",
     "Exchange",
+    "Expand",
     "ExtractSpec",
     "Filter",
     "Foreign",
@@ -27,6 +29,7 @@ __all__ = [
     "Limit",
     "Project",
     "Recombine",
+    "Representatives",
     "Scan",
     "ScoreSpec",
     "Sort",

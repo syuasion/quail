@@ -12,6 +12,7 @@ from quail.catalog.pairs import (
     pair_ids_table,
     pair_table,
 )
+from quail.catalog.tokens import representatives
 from quail.execution.ids import document_ids, id_positions
 from quail.execution.metrics import NodeMetrics, NodeResult
 from quail.execution.result import (
@@ -29,10 +30,12 @@ from quail.logical.expressions import (
 from quail.physical import (
     Barrier,
     Exchange,
+    Expand,
     Foreign,
     GraphValidationError,
     HashJoin,
     Recombine,
+    Representatives,
     ValueType,
 )
 
@@ -274,6 +277,62 @@ class ModelNodeRuntime:
         if context.model_result is not None:
             context.model_result(node, result, context)
         return result
+
+
+class RepresentativesRuntime:
+    """Keep the first document of each group with identical tokens."""
+
+    def execute(self, node, inputs, context) -> NodeResult:
+        if not isinstance(node, Representatives):
+            raise TypeError(type(node).__name__)
+        (value,) = inputs.values()
+        ids = document_ids(value)
+        chosen = representatives(context.state["documents"][node.alias],
+                                 ids.to_numpy())
+        kept = pc.equal(ids.cast(pa.int64()), pa.array(chosen))
+        copies = pa.table({"copy": ids,
+                           "representative": pa.array(chosen, pa.int32())})
+        return NodeResult(
+            {f"rows:{node.alias}": Rows({node.alias: ids.filter(kept)}),
+             f"copies:{node.alias}": copies},
+            NodeMetrics(input_rows=len(ids),
+                        output_rows=pc.sum(kept).as_py() or 0))
+
+
+class ExpandRuntime:
+    """Give every copy the answers of its representative."""
+
+    def execute(self, node, inputs, context) -> NodeResult:
+        if not isinstance(node, Expand):
+            raise TypeError(type(node).__name__)
+        *answers, copies = (inputs[port.name] for port in node.inputs)
+        copy = copies.column("copy").to_numpy()
+        representative = copies.column("representative").to_numpy()
+        outputs = {}
+        for port, value in zip(node.ports, answers, strict=True):
+            if port.value_type is ValueType.FILTER_ANSWERS:
+                outputs[port.name] = {
+                    int(document): value[int(source)]
+                    for document, source in zip(copy, representative)
+                    if int(source) in value}
+            else:
+                outputs[port.name] = _expanded_rows(
+                    value, node.alias, copy, representative)
+        rows = outputs[f"rows:{node.alias}"]
+        return NodeResult(outputs, NodeMetrics(input_rows=len(copy),
+                                               output_rows=len(rows)))
+
+
+def _expanded_rows(rows: Rows, alias: str, copy, representative) -> Rows:
+    """Return one row per copy whose representative has a row, by copy id."""
+    position = {int(document): index for index, document in
+                enumerate(rows.ids[alias].to_numpy())}
+    pairs = sorted((int(document), position[int(source)])
+                   for document, source in zip(copy, representative)
+                   if int(source) in position)
+    documents = pa.array([document for document, _ in pairs], pa.int32())
+    taken = rows.take([index for _, index in pairs])
+    return Rows({alias: documents}, taken.values)
 
 
 class HashJoinRuntime:

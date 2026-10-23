@@ -716,6 +716,30 @@ class PrefixTree:
         return self._reader_groups
 
 
+def representatives(documents, positions) -> np.ndarray:
+    """Return, per position, the first listed position with identical tokens.
+
+    Args:
+        documents: Token documents, indexed by position.
+        positions: The document positions to group, in order.
+
+    Returns:
+        An int64 array as long as positions; a position whose tokens
+        appear first stands for itself.
+    """
+    first = {}
+    chosen = np.empty(len(positions), dtype=np.int64)
+    for index, position in enumerate(positions):
+        document = documents[int(position)]
+        try:
+            key = _token_array(document).astype(">i4").tobytes()
+        except (TypeError, ValueError):
+            # Test tokenizers may return words instead of integer token IDs.
+            key = tuple(document)
+        chosen[index] = first.setdefault(key, int(position))
+    return chosen
+
+
 class PrefixIndex:
     """Sorted document positions and common prefixes shared by page-size trees."""
 
