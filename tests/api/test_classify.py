@@ -483,7 +483,8 @@ def test_planner_places_and_scores_classifications(session, tmp_path):
         "should_push_down_filters", "should_lift_maps",
         "should_eliminate_window_sort", "should_push_down_limit_through_window",
         "should_push_down_limit", "choose_classify_implementation", "should_retain_kv",
-        "should_share_prefixes", "choose_attention_algorithm"]
+        "should_share_prefixes", "choose_attention_algorithm",
+        "should_ask_once_per_document"]
     plan = _topic(session).plan()
     # choose_classify_implementation chose every classification's scoring rule
     assert all(node.spec.scoring for node in plan.nodes

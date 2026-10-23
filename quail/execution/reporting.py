@@ -10,7 +10,7 @@ from quail.execution.result import (
     true_answer_rows,
 )
 from quail.execution.rows import Rows, as_table
-from quail.physical import AiJoin, Barrier, PortRef, ValueType
+from quail.physical import AiJoin, Barrier, HashJoin, PortRef, ValueType
 
 
 def execution_report(plan, metrics, notes, coordinator_wall):
@@ -61,8 +61,19 @@ def execution_report(plan, metrics, notes, coordinator_wall):
     return report
 
 
+def superseded_outputs(plan) -> set:
+    """The model outputs a HashJoin joins back to every document, and so replaces."""
+    return {port.source for node in plan.nodes
+            if isinstance(node, HashJoin) and node.ports
+            for port in node.inputs[1:]}
+
+
 def collect_answers(logical, plan, outputs, documents):
     """Collect answer tables, surviving rows, and measured predicate selectivity."""
+    # a HashJoin's answers for every document replace those it read
+    superseded = superseded_outputs(plan)
+    outputs = {ref: value for ref, value in outputs.items()
+               if ref not in superseded}
     operators = logical.operators()
     scans, logical_filters, logical_joins = (
         operators.scans, operators.all_filters(), operators.joins)

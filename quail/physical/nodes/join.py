@@ -182,6 +182,14 @@ class HashJoin(PhysicalNode):
     writes the pairs the join at ``written_position``
     asks the model about. ``pair_fraction`` is the planner's estimate
     of the pairs kept over the cross product.
+
+    With ``ports`` it joins a model operator's answers back instead:
+    its first input is every document of ``left``, its other inputs are
+    the operator's outputs over some of them, one per port in
+    ``ports``, and each document takes the answers of the answered
+    document whose ``on`` columns equal its own. It writes ``ports``,
+    the operator's own ports, for every document; ``written_position``
+    is then the operator's, for its filter answers.
     """
 
     left: str = ""
@@ -189,12 +197,20 @@ class HashJoin(PhysicalNode):
     on: tuple[tuple[Expression, Expression], ...] = ()
     written_position: int = -1
     pair_fraction: float = 1.0
+    ports: tuple[OutputPort, ...] = ()
 
     type_name: ClassVar[str] = "quail.hash_join"
     runtime_key: ClassVar[str] = type_name
     location: ClassVar[ExecutionLocation] = ExecutionLocation.GPU_EXECUTOR
 
     @property
+    def alias(self) -> str:
+        """The table whose documents an answer join fills, as a filter names it."""
+        return self.left
+
+    @property
     def outputs(self) -> tuple[OutputPort, ...]:
+        if self.ports:
+            return self.ports
         return (OutputPort(f"pairs:{self.written_position}", ValueType.PAIRS,
                            schema=(self.left, self.right)),)

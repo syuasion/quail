@@ -12,6 +12,7 @@ from quail.api.execute import execute_query
 from quail.catalog import inputs
 from quail.catalog.pairs import columns_key, estimate_pair_fraction
 from quail.catalog.selection import selected_rows
+from quail.catalog.tokens import TEXT_HASH_COLUMNS
 from quail.execution.metrics import NodeMetrics, scalar_node_metrics
 from quail.execution.projection import projection_for
 from quail.execution.reporting import collect_answers, execution_report
@@ -29,6 +30,7 @@ from quail.logical.expressions import (
     evaluate_expression,
     source_columns,
 )
+from quail.physical import Aggregate as PhysicalAggregate
 from quail.physical import Scan, encode_graph
 from quail.planner import plan_query, refine_plan
 from quail.planner.optimizer.context import PlanningContext
@@ -429,11 +431,19 @@ class Query:
         for alias, key in filter_stop_keys(self.logical).items():
             for column in key:
                 needed.setdefault(alias, {})[column] = None
+        hashed = {node.alias for node in self.plan().nodes
+                  if isinstance(node, PhysicalAggregate) and node.alias}
+        for alias in hashed:
+            for column in TEXT_HASH_COLUMNS:
+                needed.setdefault(alias, {})[column] = None
         tables = {}
         for alias, columns in needed.items():
             store = self._token_inputs[alias]
-            tables[columns_key(alias)] = pa.table(
-                {name: store.column(name) for name in columns})
+            # the text hash comes from the tokens, not a stored column
+            tables[columns_key(alias)] = pa.table({
+                name: (store.tokens.text_hashes.column(name)
+                       if name in TEXT_HASH_COLUMNS else store.column(name))
+                for name in columns})
         return tables
 
     def finish(self, response, coordinator_wall: float = 0.0) -> QueryResult:

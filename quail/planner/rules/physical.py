@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from quail.catalog.tokens import TEXT_HASH_COLUMNS
 from quail.cost.budgets import choose_attention_path, tree_attention_allowed
 from quail.cost.retention import coefficients
+from quail.logical import ColumnRef
 from quail.physical import (
     Aggregate as PhysicalAggregate,
 )
@@ -16,6 +18,7 @@ from quail.physical import (
     AiInference,
     AiJoin,
     AiScore,
+    HashJoin,
     Limit,
     PhysicalGraph,
     PortRef,
@@ -433,3 +436,120 @@ class ChooseAttentionAlgorithm(PhysicalRule):
         if not changed:
             return None
         return PhysicalGraph(tuple(nodes), graph.root)
+
+
+# the share of an operator's documents that must be copies of others
+# before it is asked once per distinct document
+MIN_COPIES = 0.01
+# the Aggregate's output: the first document of each text
+_FIRST = "first_document"
+
+
+class ShouldAskOncePerDocument(PhysicalRule):
+    """Ask a model operator once per text: group by text hash, then join back.
+
+    An Aggregate before the operator groups the table's documents by
+    their text hash and keeps the first of each group; a HashJoin after
+    it gives every document the answers of the kept document with the
+    same hash. The rule wraps a filter, a one-document classification,
+    or a one-document score that runs alone: one in a pipeline hands
+    its documents' KV to the next operator, which skipped documents
+    would lack. It leaves an operator that keeps KV for a later one,
+    several GPUs, and diffusion models, whose answers depend on a
+    document's row as well as its tokens.
+    """
+
+    name = "should_ask_once_per_document"
+
+    def rewrite(self, graph: PhysicalGraph, context) -> PhysicalGraph | None:
+        model = None if context is None else context.model
+        if model is None or context.gpus != 1 or model.canvas_tokens:
+            return None
+        pipelines = build_pipelines(graph)
+        nodes = list(graph.nodes)
+        root = graph.root
+        changed = False
+        for node in graph.nodes:
+            alias = _single_alias(node)
+            if (alias is None or len(pipelines.get(node.node_id, (node,))) != 1
+                    or getattr(node, "keep_kv", False)
+                    or any(isinstance(graph.node(port.source.node_id),
+                                      PhysicalAggregate)
+                           for port in node.inputs)
+                    or not _copied(context, alias)):
+                continue
+            # an earlier wrap may have rewired this operator's inputs
+            current = next(item for item in nodes if item.node_id == node.node_id)
+            nodes, root = _wrapped(nodes, root, current, alias,
+                                   _provider(context, alias))
+            changed = True
+        return PhysicalGraph(tuple(nodes), root) if changed else None
+
+
+def _single_alias(node) -> str | None:
+    """The alias a model operator reads one document of, if it qualifies."""
+    if isinstance(node, AiFilter):
+        alias = node.alias
+    elif isinstance(node, AiClassify) and node.spec.partner is None:
+        (alias,) = node.document_aliases
+    elif (isinstance(node, AiScore) and node.spec is not None
+            and len(node.spec.aliases) == 1):
+        (alias,) = node.spec.aliases
+    else:
+        return None
+    ports = {port.name for port in node.outputs}
+    return alias if ports <= {f"rows:{alias}", f"filter_answers:{alias}"} else None
+
+
+def _copied(context, alias: str) -> bool:
+    """Whether enough of an alias's documents copy another's tokens."""
+    lengths = context.document_tokens.get(alias)
+    store = None if lengths is None else lengths.store
+    if store is None or not len(store):
+        return False
+    return store.num_copies >= MIN_COPIES * len(store)
+
+
+def _provider(context, alias: str) -> str:
+    """The catalog table an alias reads, as the logical plan names it."""
+    logical = context.logical_plan
+    scans = () if logical is None else logical.operators().scans
+    return next((scan.provider for scan in scans if scan.alias == alias), alias)
+
+
+def _wrapped(nodes, root, node, alias, provider):
+    """Put a text hash Aggregate before one operator and a HashJoin after it."""
+    grouped = f"group_by_text:{node.node_id}"
+    joined = f"join_answers:{node.node_id}"
+    (rows_input,) = [port for port in node.inputs
+                     if port.source.port == f"rows:{alias}"]
+    before = PhysicalAggregate(
+        node_id=grouped, inputs=input_ports((rows_input.source,)),
+        keys=TEXT_HASH_COLUMNS, aggregates=((_FIRST, "min", alias),),
+        columns=(*TEXT_HASH_COLUMNS, _FIRST), alias=alias)
+    asked = replace(node, inputs=tuple(
+        replace(port, source=PortRef(grouped, f"rows:{alias}"))
+        if port is rows_input else port for port in node.inputs))
+    key = tuple((ColumnRef(alias, provider, column),) * 2
+                for column in TEXT_HASH_COLUMNS)
+    after = HashJoin(
+        node_id=joined,
+        inputs=input_ports((rows_input.source, *(
+            PortRef(node.node_id, port.name) for port in node.outputs))),
+        left=alias, right=alias, on=key,
+        written_position=(node.written_position if isinstance(node, AiFilter)
+                          else -1),
+        ports=node.outputs)
+
+    def moved(source):
+        return (PortRef(joined, source.port)
+                if source.node_id == node.node_id else source)
+
+    rewired = []
+    for item in nodes:
+        if item.node_id == node.node_id:
+            rewired.extend((before, asked, after))
+            continue
+        rewired.append(replace(item, inputs=tuple(
+            replace(port, source=moved(port.source)) for port in item.inputs)))
+    return rewired, moved(root)

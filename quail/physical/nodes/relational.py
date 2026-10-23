@@ -88,26 +88,42 @@ class Project(PhysicalNode):
 
 @dataclass(frozen=True)
 class Aggregate(PhysicalNode):
-    """Group the result rows and compute aggregates on the coordinator.
+    """Group rows and compute aggregates.
 
     ``keys`` name input columns. ``aggregates`` are (name, function,
     argument) triples, the argument an input column or None for
     ``count(*)``. ``having`` are (name, comparison, value) tests over
     the aggregates. ``columns`` are the output columns, keys and
     aggregate names in result order.
+
+    Without ``alias`` it groups the result rows on the coordinator.
+    With ``alias`` it groups one table's documents on the executor,
+    reading the key columns from that table's value columns, before a
+    model operator reads them: its ``rows:<alias>`` output holds the
+    first aggregate's values, document ids such as one per distinct
+    text.
     """
 
     keys: tuple[str, ...] = ()
     aggregates: tuple[tuple[str, str, str | None], ...] = ()
     having: tuple[tuple[str, str, float], ...] = ()
     columns: tuple[str, ...] = ()
+    alias: str = ""
 
     type_name: ClassVar[str] = "quail.aggregate"
     runtime_key: ClassVar[str] = type_name
-    location: ClassVar[ExecutionLocation] = ExecutionLocation.COORDINATOR
+
+    @property
+    def location(self) -> ExecutionLocation:
+        # a document grouping reads value columns only the executor holds
+        return (ExecutionLocation.GPU_EXECUTOR if self.alias
+                else ExecutionLocation.COORDINATOR)
 
     @property
     def outputs(self) -> tuple[OutputPort, ...]:
+        if self.alias:
+            return (OutputPort(f"rows:{self.alias}", ValueType.ROWS,
+                               schema=(self.alias,)),)
         return (OutputPort("rows", ValueType.ROWS, schema=self.columns),)
 
 @dataclass(frozen=True)
