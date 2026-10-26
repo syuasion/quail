@@ -12,6 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from helpers.fakes import register_claims_evidence
+from helpers.oracle import Oracle, finish
 from helpers.sessions import CONFIG, TRUTH, _run, fake_tok, make_executor
 
 import quail
@@ -572,3 +573,38 @@ def test_the_process_keeps_one_engine_configuration_at_a_time():
     state.close()
     assert events == [("release", "vllm", "first"), ("release", "vllm", "second"),
                       ("release", "quail", "third")]
+
+
+def test_a_self_join_on_a_smaller_id_asks_each_unordered_pair_once():
+    asked = []
+
+    def same_problem(node, assignment):
+        asked.append((assignment["a"], assignment["b"]))
+        return True
+
+    with quail.Session(CONFIG, tokenizer=fake_tok) as session:
+        session.register("reviews", quail.DocumentProvider.from_table(pa.table({
+            "id": ["r0", "r1", "r2", "r3"],
+            "body": ["noisy room", "noisy hall", "cold room", "slow lift"],
+            "hotel": ["h1", "h1", "h1", "h2"],
+        }), id_col="id"))
+        built = (session.docs("reviews").alias("a")
+                 .join(session.docs("reviews").alias("b"), on=[
+                     quail.col("a.hotel") == quail.col("b.hotel"),
+                     quail.col("b.id") > quail.col("a.id")])
+                 .ai_filter(quail.prompt("Same problem? {0} {1}",
+                                         quail.col("a.body"), quail.col("b.body")))
+                 .select("a.id", "b.id"))
+        sql = session.sql(
+            "SELECT a.id, b.id FROM reviews a JOIN reviews b "
+            "ON a.hotel = b.hotel AND a.id < b.id AND "
+            "AI_FILTER(PROMPT('Same problem? {0} {1}', a.body, b.body))")
+        for query in (built, sql):
+            asked.clear()
+            hash_join = query.plan().graph.node("hash_join:a-b")
+            # 10 of 16 sampled pairs share a hotel; 3 of those keep a.id < b.id
+            assert hash_join.pair_fraction == pytest.approx(3 / 16)
+            result = finish(query, Oracle(joins=same_problem))
+            assert sorted(result.to_rows()) == [
+                ("r0", "r1"), ("r0", "r2"), ("r1", "r2")]
+            assert len(asked) == 3
