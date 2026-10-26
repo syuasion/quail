@@ -256,17 +256,19 @@ class Query:
             _, _, conditions, comparisons = oriented
             left_keys = keys([left for left, _ in conditions])
             right_keys = keys([right for _, right in conditions])
-            fractions[position] = estimate_pair_fraction(left_keys, right_keys)
-            if comparisons:
-                # the share of the sampled equal pairs the comparisons keep
-                matched = pair_table("left", left_keys, "right", right_keys)
-                kept = compared_pairs(
-                    matched, [item.comparison for item in comparisons],
-                    keys([item.left for item in comparisons]),
-                    keys([item.right for item in comparisons]))
-                if matched.num_rows:
-                    fractions[position] *= (max(kept.num_rows, 1)
-                                            / matched.num_rows)
+            if not comparisons:
+                fractions[position] = estimate_pair_fraction(left_keys,
+                                                             right_keys)
+                continue
+            num_pairs = len(left_keys[0]) * len(right_keys[0])
+            kept = compared_pairs(
+                pair_table("left", left_keys, "right", right_keys),
+                [item.comparison for item in comparisons],
+                keys([item.left for item in comparisons]),
+                keys([item.right for item in comparisons]))
+            # as estimate_pair_fraction, a sample with no kept pair stays off zero
+            fractions[position] = (max(kept.num_rows, 1) / num_pairs
+                                   if num_pairs else 0.0)
         return fractions
 
     def _scan_fractions(self, scans) -> dict:

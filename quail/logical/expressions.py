@@ -779,7 +779,8 @@ class ColumnComparison:
 
 
 JOIN_COMPARISONS = ("<>", "<", "<=", ">", ">=")
-FLIPPED_COMPARISONS = {"<>": "<>", "<": ">", "<=": ">=", ">": "<", ">=": "<="}
+FLIPPED_COMPARISONS = {"=": "=", "<>": "<>", "<": ">", "<=": ">=", ">": "<",
+                       ">=": "<="}
 
 
 def _explain(expression) -> str:

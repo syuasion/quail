@@ -13,7 +13,11 @@ from dataclasses import dataclass
 from sqlglot import exp
 
 from quail.logical import ColumnRef, CompileError, RegularPredicate
-from quail.logical.expressions import SPAN_SUFFIX, column_expression
+from quail.logical.expressions import (
+    FLIPPED_COMPARISONS,
+    SPAN_SUFFIX,
+    column_expression,
+)
 
 _PLAIN_COMPARISONS = {
     exp.EQ: "=",
@@ -23,8 +27,6 @@ _PLAIN_COMPARISONS = {
     exp.GT: ">",
     exp.GTE: ">=",
 }
-
-_FLIPPED = {"<": ">", "<=": ">=", ">": "<", ">=": "<=", "=": "=", "<>": "<>"}
 
 # text tests sqlglot parses to one node in both dialects; the
 # function's case rule is the dialect's
@@ -179,8 +181,8 @@ def parse_plain_test(term, dialect: str) -> PlainTest | None:
         if left is not None and right is None:
             return PlainTest(left[0], comparison, _literal(node.expression), left[1])
         if right is not None and left is None:
-            return PlainTest(right[0], _FLIPPED[comparison], _literal(node.this),
-                             right[1])
+            return PlainTest(right[0], FLIPPED_COMPARISONS[comparison],
+                             _literal(node.this), right[1])
         if left is not None and right is not None:
             return None
     raise CompileError(

@@ -10,7 +10,6 @@ from quail.frontend.sql_binding.expressions import (
     _is_call,
 )
 from quail.frontend.sql_binding.predicates import (
-    _FLIPPED,
     _PLAIN_COMPARISONS,
     COLUMN_NODES,
 )
@@ -26,7 +25,7 @@ from quail.logical import (
     WindowCall,
     column_name,
 )
-from quail.logical.expressions import aliased_call
+from quail.logical.expressions import FLIPPED_COMPARISONS, aliased_call
 
 
 def _parse_limit(tree) -> int | None:
@@ -280,7 +279,7 @@ class SelectBinder:
                 )
             left, right = term.this, term.expression
             if not isinstance(right, (exp.Literal, exp.Neg)):
-                left, right, comparison = right, left, _FLIPPED[comparison]
+                left, right, comparison = right, left, FLIPPED_COMPARISONS[comparison]
             if type(left) in _AGGREGATE_CLASSES:
                 candidate = self.bind_aggregate(
                     left, f"__having_{index}", f"__agg_having_{index}"
