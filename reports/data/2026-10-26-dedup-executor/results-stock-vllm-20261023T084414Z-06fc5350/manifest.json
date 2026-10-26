@@ -1,0 +1,33 @@
+{
+  "run_id": "20261023T084414Z-06fc5350",
+  "status": "complete",
+  "started_at": "2026-10-23T08:44:21.803114+00:00",
+  "model": "qwen3-4b-fp8",
+  "sf": 0.5,
+  "attention": null,
+  "canvas_draws": null,
+  "query_ids": [
+    "SUPPORT-2",
+    "SUPPORT-1",
+    "SUPPORT-4",
+    "RUNS-1",
+    "RUNS-3",
+    "RUNS-4"
+  ],
+  "summaries": {
+    "stock_vllm": "stock_vllm/run.json",
+    "pipelined_vllm": "pipelined_vllm/run.json"
+  },
+  "function_call_ids": {
+    "data": "fc-01M5KYXG2NCMXDDXEBJF1BHE40",
+    "support:quail_vllm": "fc-01M5KYY0VW3ZKX43NNMWVT5EXV",
+    "runs:quail_vllm": "fc-01M5KYY0Y0BJVQPV0252RY6D9N"
+  },
+  "collection_id": "gt_1d3d18a553eb491a99b425524c21ea16",
+  "parallel_wall_s": 1194.9,
+  "families": {
+    "support": "families/support.json",
+    "runs": "families/runs.json"
+  },
+  "finished_at": "2026-10-23T09:04:16.881238+00:00"
+}

@@ -1,0 +1,32 @@
+{
+  "run_id": "20261025T205345Z-c8b9b4ee",
+  "status": "complete",
+  "started_at": "2026-10-25T20:53:54.787043+00:00",
+  "model": "qwen3-4b-fp8",
+  "sf": 0.5,
+  "attention": null,
+  "canvas_draws": null,
+  "query_ids": [
+    "SUPPORT-2",
+    "SUPPORT-1",
+    "SUPPORT-4",
+    "RUNS-1",
+    "RUNS-3",
+    "RUNS-4"
+  ],
+  "summaries": {
+    "quail": "quail/run.json"
+  },
+  "function_call_ids": {
+    "data": "fc-01M5TDETFWFPAB9DQJ7ZX34VHZ",
+    "support:quail_vllm": "fc-01M5TDFAN11FXSZ9AW75YJS404",
+    "runs:quail_vllm": "fc-01M5TDFASGB08C3V8ECPDKW0AD"
+  },
+  "collection_id": "gt_1d3d18a553eb491a99b425524c21ea16",
+  "parallel_wall_s": 744.4,
+  "families": {
+    "support": "families/support.json",
+    "runs": "families/runs.json"
+  },
+  "finished_at": "2026-10-25T21:06:19.223293+00:00"
+}

@@ -1,0 +1,47 @@
+{
+  "run_id": "20261026T041414Z-5d9ee793",
+  "status": "complete",
+  "started_at": "2026-10-26T04:14:21.426228+00:00",
+  "model": "qwen3-4b-fp8",
+  "sf": 0.1,
+  "attention": null,
+  "canvas_draws": null,
+  "device": "h100-sxm",
+  "gpus": 1,
+  "query_ids": [
+    "IMDB-1",
+    "IMDB-2",
+    "IMDB-4",
+    "FEV-9",
+    "IMDB-11",
+    "AGENT-5",
+    "IMDB-15",
+    "CUAD-1",
+    "CUAD-4",
+    "CUAD-10",
+    "CUAD-15",
+    "CUAD-11",
+    "SALES-5"
+  ],
+  "summaries": {
+    "quail": "quail/run.json"
+  },
+  "function_call_ids": {
+    "data": "fc-01M5V6N8J0VS4AMQ3MDGKZW1D4",
+    "imdb:quail_vllm": "fc-01M5V6P2FYYF21T1NH3FRA7SKE",
+    "fever:quail_vllm": "fc-01M5V6P2J7D299FZNDPCGXADVM",
+    "agent:quail_vllm": "fc-01M5V6P2N5296T08AX2MG16Z9T",
+    "sales:quail_vllm": "fc-01M5V6P2RBHH49GB4ZZQ3TA2VX",
+    "cuad:quail_vllm": "fc-01M5V6P2TQXGDZJJM3YXG2XJ8X"
+  },
+  "collection_id": "gt_349c059f13738eaeb76d230361f3c219",
+  "parallel_wall_s": 430.9,
+  "families": {
+    "imdb": "families/imdb.json",
+    "fever": "families/fever.json",
+    "agent": "families/agent.json",
+    "sales": "families/sales.json",
+    "cuad": "families/cuad.json"
+  },
+  "finished_at": "2026-10-26T04:21:32.372178+00:00"
+}
