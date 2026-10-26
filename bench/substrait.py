@@ -9,8 +9,6 @@ aggregate, having, sort, and fetch steps, then the projection.
 
 from __future__ import annotations
 
-import operator
-
 import quail
 from quail.frontend.expressions import AggSpec, HavingSpec, PredicateSpec
 from quail_b.substrait import (
@@ -26,10 +24,6 @@ from quail_b.substrait import (
     Score,
     Sort,
 )
-
-# a QUAIL-B join comparison as the builder's column comparison
-_COMPARE = {"<>": operator.ne, "<": operator.lt, "<=": operator.le,
-            ">": operator.gt, ">=": operator.ge}
 
 
 def build_query(session, info: PlanInfo, selectivity=None,
@@ -112,12 +106,8 @@ def build_query(session, info: PlanInfo, selectivity=None,
             raise ValueError(f"join {join.id!r} must add one relation")
         left, right = join.relations
         query = query.join(relation_query(new[0]), on=[
-            *(quail.col(f"{left}.{left_column}")
-              == quail.col(f"{right}.{right_column}")
-              for left_column, right_column in join.on),
-            *(_COMPARE[comparison](quail.col(f"{left}.{left_column}"),
-                                   quail.col(f"{right}.{right_column}"))
-              for left_column, comparison, right_column in join.comparisons),
+            quail.col(f"{left}.{left_column}") == quail.col(f"{right}.{right_column}")
+            for left_column, right_column in join.on
         ]).ai_filter(
             quail.prompt(join.prompt, document(left), document(right)),
             selectivity=selectivity.get(join.prompt))
