@@ -67,14 +67,15 @@ def compared_pairs(pairs: pa.Table, comparisons, left_values,
         right_values: Per comparison, the right table's values by row.
     """
     left_alias, right_alias = pairs.column_names
-    passed = pa.array([True] * pairs.num_rows, pa.bool_())
+    passed = None
     for comparison, left, right in zip(comparisons, left_values, right_values,
                                        strict=True):
         compared = COMPARISON_KERNELS[comparison](
             pc.take(left, pairs.column(left_alias)),
             pc.take(right, pairs.column(right_alias)))
-        passed = pc.and_(passed, pc.fill_null(compared, False))
-    return pairs.filter(passed)
+        passed = compared if passed is None else pc.and_(passed, compared)
+    # filter drops a null mask entry, so a null comparison fails the pair
+    return pairs if passed is None else pairs.filter(passed)
 
 
 def _join_key_tables(left_keys, right_keys) -> tuple[pa.Table, pa.Table]:
